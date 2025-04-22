@@ -11,7 +11,7 @@ import socket
 import threading
 
 HOST = '127.0.0.1'
-PORT = 5000
+PORT = 5001
 
 # HINT: The current problem is that the client is reading from the socket,
 # then waiting for user input, then reading again. This causes server
@@ -48,6 +48,22 @@ def receive_messages(rfile):
             while True:
                 board_line = rfile.readline()
 
+                if not board_line or board_line.strip() == "":
+                    break
+                print(board_line.strip())
+        elif line == "YOUR_GRID":
+            # Display player's own grid with ships
+            print("\n[Your Board]")
+            while True:
+                board_line = rfile.readline()
+                if not board_line or board_line.strip() == "":
+                    break
+                print(board_line.strip())
+        elif line == "OPPONENT_GRID":
+            # Display opponent's grid (only hits/misses visible)
+            print("\n[Opponent's Board]")
+            while True:
+                board_line = rfile.readline()
                 if not board_line or board_line.strip() == "":
                     break
                 print(board_line.strip())

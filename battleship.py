@@ -357,6 +357,131 @@ def run_single_player_game_online(rfile, wfile):
         except ValueError as e:
             send(f"Invalid input: {e}")
 
+
+def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile):
+    """
+    Run a two-player Battleship game with I/O redirected to socket file objects.
+    Each player takes turns firing at their opponent's board.
+    
+    Expects:
+      - player1_rfile/player1_wfile: File-like objects for player1
+      - player2_rfile/player2_wfile: File-like objects for player2
+    """
+    def send_to_player(player_wfile, msg):
+        player_wfile.write(msg + '\n')
+        player_wfile.flush()
+    
+    def send_board_to_player(player_wfile, own_board, opponent_board):
+        # First send player's own board (with ships visible)
+        player_wfile.write("YOUR_GRID\n")
+        player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
+        for r in range(own_board.size):
+            row_label = chr(ord('A') + r)
+            row_str = " ".join(own_board.hidden_grid[r][c] for c in range(own_board.size))
+            player_wfile.write(f"{row_label:2} {row_str}\n")
+        player_wfile.write('\n')
+        
+        # Then send opponent's board (only hits/misses visible)
+        player_wfile.write("OPPONENT_GRID\n")
+        player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
+        for r in range(opponent_board.size):
+            row_label = chr(ord('A') + r)
+            row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
+            player_wfile.write(f"{row_label:2} {row_str}\n")
+        player_wfile.write('\n')
+        
+        player_wfile.flush()
+    
+    def recv_from_player(player_rfile):
+        return player_rfile.readline().strip()
+    
+    # Create boards for each player
+    player1_board = Board(BOARD_SIZE)
+    player2_board = Board(BOARD_SIZE)
+    
+    # Place ships randomly for both players
+    player1_board.place_ships_randomly(SHIPS)
+    player2_board.place_ships_randomly(SHIPS)
+    
+    # Welcome messages
+    send_to_player(player1_wfile, "Welcome to Battleship! You are Player 1. Waiting for Player 2 to join...")
+    send_to_player(player2_wfile, "Welcome to Battleship! You are Player 2. Game is starting...")
+    
+    # Notify both players that game is starting
+    send_to_player(player1_wfile, "Game is starting! Player 2 has joined.")
+    send_to_player(player2_wfile, "Game is starting! You are playing against Player 1.")
+    
+    # Main game loop - alternate between players
+    current_player = 1  # Start with player 1
+    
+    while True:
+        # Determine current player's files and boards
+        if current_player == 1:
+            current_rfile, current_wfile = player1_rfile, player1_wfile
+            other_rfile, other_wfile = player2_rfile, player2_wfile
+            current_board, opponent_board = player1_board, player2_board
+            current_player_name, opponent_name = "Player 1", "Player 2"
+        else:
+            current_rfile, current_wfile = player2_rfile, player2_wfile
+            other_rfile, other_wfile = player1_rfile, player1_wfile
+            current_board, opponent_board = player2_board, player1_board
+            current_player_name, opponent_name = "Player 2", "Player 1"
+        
+        # Notify players about whose turn it is
+        send_to_player(current_wfile, f"It's your turn, {current_player_name}!")
+        send_to_player(other_wfile, f"Waiting for {current_player_name} to make a move...")
+        
+        # Send board states to current player
+        send_board_to_player(current_wfile, current_board, opponent_board)
+        
+        # Prompt for a move
+        send_to_player(current_wfile, "Enter coordinate to fire at (e.g. B5):")
+        
+        # Get the move
+        guess = recv_from_player(current_rfile)
+        if guess.lower() == 'quit':
+            send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
+            send_to_player(other_wfile, f"{current_player_name} has quit. You win by default!")
+            return
+        
+        try:
+            row, col = parse_coordinate(guess)
+            result, sunk_name = opponent_board.fire_at(row, col)
+            
+            # Inform both players of the result
+            if result == 'hit':
+                if sunk_name:
+                    send_to_player(current_wfile, f"HIT! You sank {opponent_name}'s {sunk_name}!")
+                    send_to_player(other_wfile, f"{current_player_name} fired at {guess} and sank your {sunk_name}!")
+                else:
+                    send_to_player(current_wfile, "HIT!")
+                    send_to_player(other_wfile, f"{current_player_name} fired at {guess} and scored a hit!")
+                
+                # Check if all ships are sunk
+                if opponent_board.all_ships_sunk():
+                    send_board_to_player(current_wfile, current_board, opponent_board)
+                    send_board_to_player(other_wfile, opponent_board, current_board)
+                    
+                    send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
+                    send_to_player(other_wfile, f"Game over! {current_player_name} has sunk all your ships.")
+                    return
+            elif result == 'miss':
+                send_to_player(current_wfile, "MISS!")
+                send_to_player(other_wfile, f"{current_player_name} fired at {guess} and missed!")
+            elif result == 'already_shot':
+                send_to_player(current_wfile, "You've already fired at that location. Try again.")
+                # Don't switch players for an invalid move
+                continue
+                
+        except ValueError as e:
+            send_to_player(current_wfile, f"Invalid input: {e}. Try again.")
+            # Don't switch players for an invalid move
+            continue
+        
+        # Switch to the other player for the next turn
+        current_player = 2 if current_player == 1 else 1
+
+
 if __name__ == "__main__":
     # Optional: run this file as a script to test single-player mode
     run_single_player_game_locally()
