@@ -153,9 +153,14 @@ class Board:
           - ('hit', <ship_name>)   if that shot causes the entire ship to sink
           - ('miss', None)         if no ship was there
           - ('already_shot', None) if that cell was already revealed as 'X' or 'o'
+          - ('invalid', None)      if the coordinates are out of bounds
 
         The server can use this result to inform the firing player.
         """
+        # Validate row and col are within bounds
+        if row < 0 or row >= self.size or col < 0 or col >= self.size:
+            return ('invalid', None)
+            
         cell = self.hidden_grid[row][col]
         if cell == 'S':
             # Mark a hit
@@ -235,12 +240,41 @@ def parse_coordinate(coord_str):
     HINT: you might want to add additional input validation here...
     """
     coord_str = coord_str.strip().upper()
+    print(BOARD_SIZE)
+    
+    # Check if the input is empty
+    if not coord_str:
+        raise ValueError("Coordinate cannot be empty")
+    
+    # Check if first character is a letter
+    if not coord_str[0].isalpha():
+        raise ValueError("Coordinate must start with a letter (A-J)")
+    
+    # Check if there are digits after the letter
+    if len(coord_str) < 2 or not coord_str[1:].isdigit():
+        raise ValueError("Coordinate must have a number after the letter")
+    
     row_letter = coord_str[0]
     col_digits = coord_str[1:]
-
+    
+    # Validate the column number before converting
+    col_num = int(col_digits)
+    if col_num < 1 or col_num > BOARD_SIZE:
+        raise ValueError(f"Column must be a number between 1 and {BOARD_SIZE}")
+    
+    # Convert to row, col indices
     row = ord(row_letter) - ord('A')
-    col = int(col_digits) - 1  # zero-based
-
+    col = col_num - 1  # zero-based
+    
+    # Check if the row is in range (A-J for a 10x10 board)
+    if row < 0 or row >= BOARD_SIZE:
+        raise ValueError(f"Row must be a letter between A and {chr(ord('A') + BOARD_SIZE - 1)}")
+    
+    # Check if the column is in range (1-10 for a 10x10 board)
+    if col < 0 or col >= BOARD_SIZE:
+        print("X")
+        raise ValueError(f"Column must be a number between 1 and {BOARD_SIZE}")
+    
     return (row, col)
 
 
@@ -368,38 +402,48 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
       - player2_rfile/player2_wfile: File-like objects for player2
     """
     def send_to_player(player_wfile, msg):
-        player_wfile.write(msg + '\n')
-        player_wfile.flush()
+        try:
+            player_wfile.write(msg + '\n')
+            player_wfile.flush()
+        except Exception as e:
+            print(f"Error sending to player: {e}")
     
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
-        # First send player's own board (with ships visible)
-        player_wfile.write("YOUR_GRID\n")
-        player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
-        for r in range(own_board.size):
-            row_label = chr(ord('A') + r)
-            row_str = " ".join(own_board.hidden_grid[r][c] for c in range(own_board.size))
-            player_wfile.write(f"{row_label:2} {row_str}\n")
-        player_wfile.write('\n')
-        
-        # Then send opponent's board (only hits/misses visible) if provided
-        if opponent_board:
-            player_wfile.write("OPPONENT_GRID\n")
-            player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
-            for r in range(opponent_board.size):
+        try:
+            # First send player's own board (with ships visible)
+            player_wfile.write("YOUR_GRID\n")
+            player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
+            for r in range(own_board.size):
                 row_label = chr(ord('A') + r)
-                row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
+                row_str = " ".join(own_board.hidden_grid[r][c] for c in range(own_board.size))
                 player_wfile.write(f"{row_label:2} {row_str}\n")
             player_wfile.write('\n')
-        
-        player_wfile.flush()
+            
+            # Then send opponent's board (only hits/misses visible) if provided
+            if opponent_board:
+                player_wfile.write("OPPONENT_GRID\n")
+                player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
+                for r in range(opponent_board.size):
+                    row_label = chr(ord('A') + r)
+                    row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
+                    player_wfile.write(f"{row_label:2} {row_str}\n")
+                player_wfile.write('\n')
+            
+            player_wfile.flush()
+        except Exception as e:
+            print(f"Error sending board to player: {e}")
     
     def recv_from_player(player_rfile):
-        return player_rfile.readline().strip()
+        try:
+            return player_rfile.readline().strip()
+        except Exception as e:
+            print(f"Error receiving from player: {e}")
+            return "quit"  # Force quit on read error
     
     def handle_ship_placement(player_rfile, player_wfile, player_board, player_name):
         """
         Handle the ship placement phase for a player.
-        Returns True if ships were placed manually, False if randomly.
+        Returns True if ships were placed successfully (manually or randomly), False if player quit.
         """
         send_to_player(player_wfile, f"{player_name}, it's time to place your ships!")
         send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
@@ -418,8 +462,16 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     send_to_player(player_wfile, "Enter starting coordinate (e.g. A1):")
                     coord_str = recv_from_player(player_rfile).strip()
                     
+                    # Check for quit command
+                    if coord_str.lower() == 'quit':
+                        return False
+                    
                     send_to_player(player_wfile, "Orientation? Enter 'H' (horizontal) or 'V' (vertical):")
                     orientation_str = recv_from_player(player_rfile).strip().upper()
+                    
+                    # Check for quit command
+                    if orientation_str.lower() == 'quit':
+                        return False
                     
                     try:
                         row, col = parse_coordinate(coord_str)
@@ -451,11 +503,11 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(player_wfile, "All ships placed successfully!")
             return True
         else:
-            # Random placement
+            # Random placement (any non-M input)
             player_board.place_ships_randomly(SHIPS)
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
             send_board_to_player(player_wfile, player_board)
-            return False
+            return True  # Return True for successful random placement
     
     # Create boards for each player
     player1_board = Board(BOARD_SIZE)
@@ -473,12 +525,18 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     send_to_player(player1_wfile, "Starting ship placement phase...")
     send_to_player(player2_wfile, "Waiting for Player 1 to place ships...")
     
-    handle_ship_placement(player1_rfile, player1_wfile, player1_board, "Player 1")
+    if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, "Player 1"):
+        send_to_player(player1_wfile, "You have quit during ship placement. Game ending.")
+        send_to_player(player2_wfile, "Player 1 has quit during ship placement. Game ending.")
+        return
     
     send_to_player(player1_wfile, "Waiting for Player 2 to place ships...")
     send_to_player(player2_wfile, "Player 1 has placed their ships. Now it's your turn.")
     
-    handle_ship_placement(player2_rfile, player2_wfile, player2_board, "Player 2")
+    if not handle_ship_placement(player2_rfile, player2_wfile, player2_board, "Player 2"):
+        send_to_player(player1_wfile, "Player 2 has quit during ship placement. Game ending.")
+        send_to_player(player2_wfile, "You have quit during ship placement. Game ending.")
+        return
     
     # Notify both players that the firing phase is starting
     send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
@@ -543,6 +601,10 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 send_to_player(other_wfile, f"{current_player_name} fired at {guess} and missed!")
             elif result == 'already_shot':
                 send_to_player(current_wfile, "You've already fired at that location. Try again.")
+                # Don't switch players for an invalid move
+                continue
+            elif result == 'invalid':
+                send_to_player(current_wfile, "Invalid coordinate. Please enter a valid coordinate (e.g. A1-J10).")
                 # Don't switch players for an invalid move
                 continue
                 
