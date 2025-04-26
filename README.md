@@ -10,7 +10,7 @@ Tasks:
     3. T1.3: Basic Game Flow - ***Done***
     4. T1.4: Simple Client/Server Message Exchange - ***Done***
     5. T1.5: No Disconnection Handling - ***Done***
-2. Tier 2: Gameplay Quality-of-Life & Scalability
+2. Tier 2: ***Gameplay Quality-of-Life & Scalability***
     1. T2.1: Extended Input Validation - ***Done***
     2. T2.2: Support Multiple Games - To Do
     3. T2.3: Timeout Handling - To Do
