@@ -4,12 +4,14 @@ server.py
 Serves Battleship game sessions to connected clients (clients can change over time).
 Game logic is handled entirely on the server using battleship.py.
 Client sends FIRE commands, and receives game feedback.
-Supports multiple games in sequence without restarting the server.
+Supports multiple games in sequence without restarting the server, both with the same players
+or with entirely new connections.
 """
 
 import socket
 import threading
 import traceback
+import time
 from battleship import run_two_player_game
 
 HOST = '127.0.0.1'
@@ -89,6 +91,10 @@ def run_game_server():
                 # Start a game session with these two players
                 handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr)
                 
+                # After handle_game_session returns, the connections are closed
+                # and the server is ready to accept new connections
+                print("[INFO] Server is ready for new connections.")
+                
             except KeyboardInterrupt:
                 print("[INFO] Server shutting down by keyboard interrupt")
                 if player1_conn:
@@ -105,6 +111,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
     """
     Handle a game session between two connected players.
     Manages multiple games in succession if players choose to play again.
+    When this function returns, the connections will be closed.
     """
     # Set socket timeouts for gameplay
     player1_conn.settimeout(CONNECTION_TIMEOUT)
@@ -129,6 +136,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
             player2_wfile.write("Game over! Please wait...\n")
             player2_wfile.flush()
             
+            # Add a delay to ensure players can see the final results
+            time.sleep(3)  # 3 second delay
+            
             # Ask players if they want to play again
             player1_wants_rematch = ask_play_again(player1_rfile, player1_wfile)
             player2_wants_rematch = ask_play_again(player2_rfile, player2_wfile)
@@ -152,9 +162,18 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                     player2_wfile.flush()
                     player1_wfile.write("The other player declined to play again. Ending session.\n")
                     player1_wfile.flush()
+                else:
+                    player1_wfile.write("Session ending due to an unexpected error.\n")
+                    player1_wfile.flush()
+                    player2_wfile.write("Session ending due to an unexpected error.\n")
+                    player2_wfile.flush()
                 play_again = False
         
         # Game session ended by player choice
+        player1_wfile.write("Thank you for playing! Disconnecting now.\n")
+        player1_wfile.flush()
+        player2_wfile.write("Thank you for playing! Disconnecting now.\n")
+        player2_wfile.flush()
         print(f"[INFO] Game session ended between players at {player1_addr} and {player2_addr}")
     
     except socket.timeout:
@@ -170,7 +189,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
         try:
             player1_conn.close()
             player2_conn.close()
-            print("[INFO] Game session ended. All clients disconnected.")
+            print("[INFO] Client connections closed. Ready for new players.")
         except:
             pass
 

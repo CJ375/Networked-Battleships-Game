@@ -590,9 +590,11 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 
                 # Check if all ships are sunk
                 if opponent_board.all_ships_sunk():
+                    # Show both boards to both players one final time
                     send_board_to_player(current_wfile, current_board, opponent_board)
                     send_board_to_player(other_wfile, opponent_board, current_board)
                     
+                    # Send victory/defeat messages
                     send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
                     send_to_player(other_wfile, f"Game over! {current_player_name} has sunk all your ships.")
                     return
