@@ -9,6 +9,8 @@ Contains core data structures and logic for Battleship, including:
 """
 
 import random
+import select
+import time
 
 BOARD_SIZE = 10
 SHIPS = [
@@ -396,11 +398,15 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     """
     Run a two-player Battleship game with I/O redirected to socket file objects.
     Each player takes turns firing at their opponent's board.
+    Includes a timeout mechanism to handle inactive players.
     
     Expects:
       - player1_rfile/player1_wfile: File-like objects for player1
       - player2_rfile/player2_wfile: File-like objects for player2
     """
+    # Timeout settings
+    MOVE_TIMEOUT = 30  # seconds a player has to make a move
+    
     def send_to_player(player_wfile, msg):
         try:
             player_wfile.write(msg + '\n')
@@ -433,9 +439,22 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         except Exception as e:
             print(f"Error sending board to player: {e}")
     
-    def recv_from_player(player_rfile):
+    def recv_from_player_with_timeout(player_rfile, timeout_secs):
+        """
+        Receive input from a player with a timeout.
+        Returns the input string or None if timeout occurs.
+        """
         try:
-            return player_rfile.readline().strip()
+            # Get the file descriptor from the file object
+            fd = player_rfile.fileno()
+            # Wait for the file descriptor to be ready for reading
+            ready, _, _ = select.select([fd], [], [], timeout_secs)
+            if ready:
+                # Data is available, read it
+                return player_rfile.readline().strip()
+            else:
+                # Timeout occurred
+                return None
         except Exception as e:
             print(f"Error receiving from player: {e}")
             return "quit"  # Force quit on read error
@@ -448,9 +467,17 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         send_to_player(player_wfile, f"{player_name}, it's time to place your ships!")
         send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
         
-        choice = recv_from_player(player_rfile).strip().upper()
+        choice = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
         
-        if choice == 'M':
+        # If timeout or no input, default to random placement
+        if choice is None:
+            send_to_player(player_wfile, "No selection made within timeout period. Ships will be placed randomly.")
+            player_board.place_ships_randomly(SHIPS)
+            send_to_player(player_wfile, "Ships have been placed randomly on your board.")
+            send_board_to_player(player_wfile, player_board)
+            return True
+        
+        if choice.upper() == 'M':
             # Manual placement
             for ship_name, ship_size in SHIPS:
                 placed = False
@@ -460,26 +487,40 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     
                     send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
                     send_to_player(player_wfile, "Enter starting coordinate (e.g. A1):")
-                    coord_str = recv_from_player(player_rfile).strip()
+                    coord_str = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
                     
-                    # Check for quit command
-                    if coord_str.lower() == 'quit':
+                    # Check for timeout or quit command
+                    if coord_str is None:
+                        send_to_player(player_wfile, f"Timeout waiting for coordinate. {ship_name} will be placed randomly.")
+                        # Place this ship randomly and continue with next ship
+                        randomly_place_single_ship(player_board, ship_name, ship_size)
+                        send_to_player(player_wfile, f"{ship_name} placed randomly.")
+                        placed = True
+                        continue
+                    elif coord_str.lower() == 'quit':
                         return False
                     
                     send_to_player(player_wfile, "Orientation? Enter 'H' (horizontal) or 'V' (vertical):")
-                    orientation_str = recv_from_player(player_rfile).strip().upper()
+                    orientation_str = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
                     
-                    # Check for quit command
-                    if orientation_str.lower() == 'quit':
+                    # Check for timeout or quit command
+                    if orientation_str is None:
+                        send_to_player(player_wfile, f"Timeout waiting for orientation. {ship_name} will be placed randomly.")
+                        # Place this ship randomly and continue with next ship
+                        randomly_place_single_ship(player_board, ship_name, ship_size)
+                        send_to_player(player_wfile, f"{ship_name} placed randomly.")
+                        placed = True
+                        continue
+                    elif orientation_str.lower() == 'quit':
                         return False
                     
                     try:
                         row, col = parse_coordinate(coord_str)
                         
                         # Convert orientation_str to 0 (horizontal) or 1 (vertical)
-                        if orientation_str == 'H':
+                        if orientation_str.upper() == 'H':
                             orientation = 0
-                        elif orientation_str == 'V':
+                        elif orientation_str.upper() == 'V':
                             orientation = 1
                         else:
                             send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
@@ -508,6 +549,25 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
             send_board_to_player(player_wfile, player_board)
             return True  # Return True for successful random placement
+
+    def randomly_place_single_ship(board, ship_name, ship_size):
+        """
+        Randomly place a single ship on the board.
+        Used when a player times out during manual placement.
+        """
+        placed = False
+        while not placed:
+            orientation = random.randint(0, 1)  # 0 => horizontal, 1 => vertical
+            row = random.randint(0, board.size - 1)
+            col = random.randint(0, board.size - 1)
+
+            if board.can_place_ship(row, col, ship_size, orientation):
+                occupied_positions = board.do_place_ship(row, col, ship_size, orientation)
+                board.placed_ships.append({
+                    'name': ship_name,
+                    'positions': occupied_positions
+                })
+                placed = True
     
     # Create boards for each player
     player1_board = Board(BOARD_SIZE)
@@ -544,6 +604,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     
     # Main game loop - alternate between players
     current_player = 1  # Start with player 1
+    consecutive_timeouts = 0  # Count consecutive timeouts to prevent infinite loops
     
     while True:
         # Determine current player's files and boards
@@ -566,10 +627,31 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         send_board_to_player(current_wfile, current_board, opponent_board)
         
         # Prompt for a move
-        send_to_player(current_wfile, "Enter coordinate to fire at (e.g. B5):")
+        send_to_player(current_wfile, f"Enter coordinate to fire at (e.g. B5): (You have {MOVE_TIMEOUT} seconds)")
         
-        # Get the move
-        guess = recv_from_player(current_rfile)
+        # Get the move with timeout
+        guess = recv_from_player_with_timeout(current_rfile, MOVE_TIMEOUT)
+        
+        # Handle timeout case
+        if guess is None:
+            consecutive_timeouts += 1
+            
+            # If too many consecutive timeouts, end the game
+            if consecutive_timeouts >= 3:
+                send_to_player(current_wfile, "You have timed out too many times. You forfeit the game.")
+                send_to_player(other_wfile, f"{current_player_name} has timed out too many times and forfeited. You win!")
+                return
+                
+            send_to_player(current_wfile, f"You took too long to make a move. Your turn is skipped. You have {3 - consecutive_timeouts} timeouts remaining.")
+            send_to_player(other_wfile, f"{current_player_name} timed out and their turn was skipped.")
+            
+            # Skip to next player's turn
+            current_player = 2 if current_player == 1 else 1
+            continue
+        
+        # Reset consecutive timeouts counter if a valid move was made
+        consecutive_timeouts = 0
+        
         if guess.lower() == 'quit':
             send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
             send_to_player(other_wfile, f"{current_player_name} has quit. You win by default!")

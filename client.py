@@ -7,6 +7,7 @@ This client handles both single-player and two-player modes:
 - Sends user commands for ship placement and firing coordinates
 - Runs in a threaded mode to handle asynchronous server messages
 - Supports playing multiple games in succession without disconnecting
+- Provides feedback about move timeouts
 """
 
 import socket
@@ -64,6 +65,11 @@ def receive_messages(rfile):
             else:
                 # Normal message
                 print(line)
+                
+                # If the message mentions a timeout, draw attention to it
+                if "timeout" in line.lower() or "timed out" in line.lower():
+                    print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
+                
         except Exception as e:
             print(f"[ERROR] Error receiving from server: {e}")
             running = False
@@ -114,7 +120,7 @@ def main():
             time.sleep(0.5)
             
     except ConnectionRefusedError:
-        print(f"[ERROR] Could not connect to server at {HOST}:{PORT}. Is the server running?")
+        print(f"[ERROR] Could not connect to server at {HOST}:{PORT} - Check that the server is running.")
     except Exception as e:
         print(f"[ERROR] Connection error: {e}")
 
