@@ -1,10 +1,15 @@
 """
 client.py
 
-Connects to a Battleship server which runs the single-player game.
-Simply pipes user input to the server, and prints all server responses.
+Connects to a Battleship server for a two-player game.
+This client handles both single-player and two-player modes:
+- Receives and displays game boards and messages from the server
+- Sends user commands for ship placement and firing coordinates
+- Runs in a threaded mode to handle asynchronous server messages
 
-TODO: Fix the message synchronization issue using concurrency (Tier 1, item 1).
+The client uses threading to separate:
+- One thread continuously reads from the socket and displays messages
+- The main thread handles user input and sends it to the server
 """
 
 import socket
@@ -12,16 +17,6 @@ import threading
 
 HOST = '127.0.0.1'
 PORT = 5001
-
-# HINT: The current problem is that the client is reading from the socket,
-# then waiting for user input, then reading again. This causes server
-# messages to appear out of order.
-#
-# Consider using Python's threading module to separate the concerns:
-# - One thread continuously reads from the socket and displays messages
-# - The main thread handles user input and sends it to the server
-#
-# import threading
 
 # Flag (global) indicating if the client should stop running
 running = True

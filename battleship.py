@@ -371,7 +371,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         player_wfile.write(msg + '\n')
         player_wfile.flush()
     
-    def send_board_to_player(player_wfile, own_board, opponent_board):
+    def send_board_to_player(player_wfile, own_board, opponent_board=None):
         # First send player's own board (with ships visible)
         player_wfile.write("YOUR_GRID\n")
         player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
@@ -381,27 +381,85 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             player_wfile.write(f"{row_label:2} {row_str}\n")
         player_wfile.write('\n')
         
-        # Then send opponent's board (only hits/misses visible)
-        player_wfile.write("OPPONENT_GRID\n")
-        player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
-        for r in range(opponent_board.size):
-            row_label = chr(ord('A') + r)
-            row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
-            player_wfile.write(f"{row_label:2} {row_str}\n")
-        player_wfile.write('\n')
+        # Then send opponent's board (only hits/misses visible) if provided
+        if opponent_board:
+            player_wfile.write("OPPONENT_GRID\n")
+            player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
+            for r in range(opponent_board.size):
+                row_label = chr(ord('A') + r)
+                row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
+                player_wfile.write(f"{row_label:2} {row_str}\n")
+            player_wfile.write('\n')
         
         player_wfile.flush()
     
     def recv_from_player(player_rfile):
         return player_rfile.readline().strip()
     
+    def handle_ship_placement(player_rfile, player_wfile, player_board, player_name):
+        """
+        Handle the ship placement phase for a player.
+        Returns True if ships were placed manually, False if randomly.
+        """
+        send_to_player(player_wfile, f"{player_name}, it's time to place your ships!")
+        send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
+        
+        choice = recv_from_player(player_rfile).strip().upper()
+        
+        if choice == 'M':
+            # Manual placement
+            for ship_name, ship_size in SHIPS:
+                placed = False
+                while not placed:
+                    # Show current board state
+                    send_board_to_player(player_wfile, player_board)
+                    
+                    send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
+                    send_to_player(player_wfile, "Enter starting coordinate (e.g. A1):")
+                    coord_str = recv_from_player(player_rfile).strip()
+                    
+                    send_to_player(player_wfile, "Orientation? Enter 'H' (horizontal) or 'V' (vertical):")
+                    orientation_str = recv_from_player(player_rfile).strip().upper()
+                    
+                    try:
+                        row, col = parse_coordinate(coord_str)
+                        
+                        # Convert orientation_str to 0 (horizontal) or 1 (vertical)
+                        if orientation_str == 'H':
+                            orientation = 0
+                        elif orientation_str == 'V':
+                            orientation = 1
+                        else:
+                            send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
+                            continue
+                        
+                        # Check if we can place the ship
+                        if player_board.can_place_ship(row, col, ship_size, orientation):
+                            occupied_positions = player_board.do_place_ship(row, col, ship_size, orientation)
+                            player_board.placed_ships.append({
+                                'name': ship_name,
+                                'positions': occupied_positions
+                            })
+                            send_to_player(player_wfile, f"{ship_name} placed successfully!")
+                            placed = True
+                        else:
+                            send_to_player(player_wfile, f"Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
+                    
+                    except ValueError as e:
+                        send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
+            
+            send_to_player(player_wfile, "All ships placed successfully!")
+            return True
+        else:
+            # Random placement
+            player_board.place_ships_randomly(SHIPS)
+            send_to_player(player_wfile, "Ships have been placed randomly on your board.")
+            send_board_to_player(player_wfile, player_board)
+            return False
+    
     # Create boards for each player
     player1_board = Board(BOARD_SIZE)
     player2_board = Board(BOARD_SIZE)
-    
-    # Place ships randomly for both players
-    player1_board.place_ships_randomly(SHIPS)
-    player2_board.place_ships_randomly(SHIPS)
     
     # Welcome messages
     send_to_player(player1_wfile, "Welcome to Battleship! You are Player 1. Waiting for Player 2 to join...")
@@ -410,6 +468,21 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     # Notify both players that game is starting
     send_to_player(player1_wfile, "Game is starting! Player 2 has joined.")
     send_to_player(player2_wfile, "Game is starting! You are playing against Player 1.")
+    
+    # Ship placement phase
+    send_to_player(player1_wfile, "Starting ship placement phase...")
+    send_to_player(player2_wfile, "Waiting for Player 1 to place ships...")
+    
+    handle_ship_placement(player1_rfile, player1_wfile, player1_board, "Player 1")
+    
+    send_to_player(player1_wfile, "Waiting for Player 2 to place ships...")
+    send_to_player(player2_wfile, "Player 1 has placed their ships. Now it's your turn.")
+    
+    handle_ship_placement(player2_rfile, player2_wfile, player2_board, "Player 2")
+    
+    # Notify both players that the firing phase is starting
+    send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
+    send_to_player(player2_wfile, "All ships have been placed. Starting the game!")
     
     # Main game loop - alternate between players
     current_player = 1  # Start with player 1

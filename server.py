@@ -4,10 +4,6 @@ server.py
 Serves a Battleship game session to two connected clients.
 Game logic is handled entirely on the server using battleship.py.
 Client sends FIRE commands, and receives game feedback.
-
-TODO: For Tier 1, item 1, you don't need to modify this file much. 
-The core issue is in how the client handles incoming messages.
-However, if you want to support multiple clients (i.e. progress through further Tiers), you'll need concurrency here too.
 """
 
 import socket
@@ -46,7 +42,8 @@ def main():
         except Exception as e:
             print(f"[ERROR] Game error: {e}")
         finally:
-            # Ensure connections are closed properly
+            # Ensure connections are closed properly when the game ends
+            # (either by one player sinking all the other player's ships or by a player forfeiting)
             player1_conn.close()
             player2_conn.close()
             print("[INFO] Game ended. All clients disconnected.")
