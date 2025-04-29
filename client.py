@@ -20,68 +20,72 @@ PORT = 5001
 # Flag (global) indicating if the client should stop running
 running = True
 
-def receive_messages(rfile):
+def receive_messages(conn, wfile):
     """
-    Continuously receive and display messages from the server
+    Continuously read messages from the server and handle them appropriately.
+    This function runs in a separate thread.
     """
-    
-    global running
-
-    while running:
-        try:
-            line = rfile.readline()
-            if not line:
-                print("\n[ERROR] Server disconnected unexpectedly. Please restart the client to reconnect.")
-                running = False
-                break
+    try:
+        rfile = conn.makefile('r')
+        #print("[DEBUG] Started receive_messages thread")
+        while True:
+            try:
+                line = rfile.readline()
+                if not line:
+                    #print("\n[DEBUG] Received empty line from server")
+                    print("\n[ERROR] Server disconnected unexpectedly")
+                    break
                 
-            line = line.strip()
-            
-            if line == "GRID":
-                # Begin reading of board lines
-                print("\n[Board]")
-                while True:
-                    board_line = rfile.readline()
-
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            elif line == "YOUR_GRID":
-                # Display player's own grid with ships
-                print("\n[Your Board]")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            elif line == "OPPONENT_GRID":
-                # Display opponent's grid (only hits/misses visible)
-                print("\n[Opponent's Board]")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            else:
-                # Normal message
+                line = line.strip()
+                if not line:
+                    #print("[DEBUG] Received empty line (whitespace)")
+                    continue
+                
+                #print(f"[DEBUG] Received message: {line}")
+                
+                # Check for special messages
+                if line == "GAME_START":
+                    #print("\n[DEBUG] Received GAME_START signal")
+                    print("\n[INFO] Game is starting!")
+                    continue
+                
+                # Handle board messages
+                if line.startswith("BOARD:"):
+                    #print("[DEBUG] Received board update")
+                    # Extract the board string
+                    board_str = line[6:]  # Remove "BOARD:" prefix
+                    # Print the board
+                    print("\n" + board_str)
+                    continue
+                
+                # Handle normal messages
                 print(line)
                 
-                # If the message mentions a timeout, draw attention to it
-                if "timeout" in line.lower() or "timed out" in line.lower():
-                    print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
+            except ConnectionResetError:
+                #print("\n[DEBUG] ConnectionResetError in receive_messages")
+                print("\n[ERROR] Server disconnected unexpectedly")
+                break
+            except BrokenPipeError:
+                #print("\n[DEBUG] BrokenPipeError in receive_messages")
+                print("\n[ERROR] Server disconnected unexpectedly")
+                break
+            except socket.timeout:
+                #print("[DEBUG] Socket timeout in receive_messages")
+                continue
+            except Exception as e:
+                #print(f"\n[DEBUG] Exception in receive_messages: {e}")
+                print(f"\n[ERROR] Error receiving message: {e}")
+                break
                 
-        except ConnectionResetError:
-            print("\n[ERROR] Connection to server was reset. Please restart the client to reconnect.")
-            running = False
-            break
-        except BrokenPipeError:
-            print("\n[ERROR] Connection to server was broken. Please restart the client to reconnect.")
-            running = False
-            break
-        except Exception as e:
-            print(f"\n[ERROR] Error receiving from server: {e}")
-            running = False
-            break
+    except Exception as e:
+        #print(f"\n[DEBUG] Outer exception in receive_messages: {e}")
+        print(f"\n[ERROR] Error in receive_messages: {e}")
+    finally:
+        try:
+            #print("[DEBUG] Closing connection in receive_messages")
+            conn.close()
+        except:
+            pass
 
 def main():
     global running
@@ -96,7 +100,7 @@ def main():
             wfile = s.makefile('w')
 
             # Start a thread for receiving messages
-            receive_thread = threading.Thread(target=receive_messages, args=(rfile,))
+            receive_thread = threading.Thread(target=receive_messages, args=(s, wfile))
             receive_thread.daemon = True # This ensures that the thread will exit when the main thread exits
             receive_thread.start()
 

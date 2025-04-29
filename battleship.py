@@ -394,7 +394,7 @@ def run_single_player_game_online(rfile, wfile):
             send(f"Invalid input: {e}")
 
 
-def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile):
+def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile, broadcast_func=None):
     """
     Run a two-player Battleship game with I/O redirected to socket file objects.
     Each player takes turns firing at their opponent's board.
@@ -403,6 +403,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     Expects:
       - player1_rfile/player1_wfile: File-like objects for player1
       - player2_rfile/player2_wfile: File-like objects for player2
+      - broadcast_func: Optional function to broadcast messages to spectators
     """
     # Timeout settings
     MOVE_TIMEOUT = 30  # seconds a player has to make a move
@@ -411,6 +412,9 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         try:
             player_wfile.write(msg + '\n')
             player_wfile.flush()
+            # If broadcast function is provided, broadcast the message
+            if broadcast_func:
+                broadcast_func(msg)
         except Exception as e:
             print(f"Error sending to player: {e}")
     
@@ -436,6 +440,10 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 player_wfile.write('\n')
             
             player_wfile.flush()
+            
+            # If broadcast function is provided, broadcast the board states
+            if broadcast_func:
+                broadcast_func("Board update:", own_board, opponent_board)
         except Exception as e:
             print(f"Error sending board to player: {e}")
     

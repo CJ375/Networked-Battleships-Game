@@ -16,3 +16,8 @@ Tasks:
     3. T2.3: Timeout Handling - ***Done***
     4. T2.4: Disconnection Handling - ***Done***
     5. T2.5: Communication with Idle or Extra Clients - ***Done***
+3. ***Tier 3: Multiple Connections***
+    1. T3.1: Multiple Concurrent Connections - To Do
+    2. T3.2: Spectator Experience - To Do
+    3. T3.3: Reconnection Support - To Do
+    4. T3.4: Transition to Next Match - To Do
