@@ -31,7 +31,7 @@ def receive_messages(rfile):
         try:
             line = rfile.readline()
             if not line:
-                print("[INFO] Server disconnected.")
+                print("\n[ERROR] Server disconnected unexpectedly. Please restart the client to reconnect.")
                 running = False
                 break
                 
@@ -70,11 +70,18 @@ def receive_messages(rfile):
                 if "timeout" in line.lower() or "timed out" in line.lower():
                     print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
                 
-        except Exception as e:
-            print(f"[ERROR] Error receiving from server: {e}")
+        except ConnectionResetError:
+            print("\n[ERROR] Connection to server was reset. Please restart the client to reconnect.")
             running = False
             break
-        
+        except BrokenPipeError:
+            print("\n[ERROR] Connection to server was broken. Please restart the client to reconnect.")
+            running = False
+            break
+        except Exception as e:
+            print(f"\n[ERROR] Error receiving from server: {e}")
+            running = False
+            break
 
 def main():
     global running
@@ -96,19 +103,41 @@ def main():
             try:
                 # Main thread handles user input
                 while running:
-                    user_input = input(">> ")
+                    try:
+                        user_input = input(">> ")
 
-                    if user_input.lower() == 'quit':
-                        print("[INFO] Quitting the game...")
+                        if user_input.lower() == 'quit':
+                            print("[INFO] Quitting the game...")
+                            running = False
+                            break
+                        
+                        # Send user input to server
+                        try:
+                            wfile.write(user_input + '\n')
+                            wfile.flush()
+                        except ConnectionResetError:
+                            print("\n[ERROR] Connection to server was reset while sending command. Please restart the client.")
+                            running = False
+                            break
+                        except BrokenPipeError:
+                            print("\n[ERROR] Connection to server was broken while sending command. Please restart the client.")
+                            running = False
+                            break
+                        except Exception as e:
+                            print(f"\n[ERROR] Failed to send command to server: {e}")
+                            running = False
+                            break
+
+                    except KeyboardInterrupt:
+                        print("\n[INFO] Client exiting due to keyboard interrupt.")
                         running = False
                         break
-                    
-                    # Send user input to server
-                    try:
-                        wfile.write(user_input + '\n')
-                        wfile.flush()
+                    except EOFError:
+                        print("\n[INFO] End of input reached. Exiting...")
+                        running = False
+                        break
                     except Exception as e:
-                        print(f"[ERROR] Failed to send command to server: {e}")
+                        print(f"\n[ERROR] Unexpected error: {e}")
                         running = False
                         break
 
