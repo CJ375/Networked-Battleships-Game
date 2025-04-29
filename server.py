@@ -63,7 +63,7 @@ def handle_waiting_player(conn, addr):
     Handle a player in the waiting lobby.
     Sends waiting messages and manages the connection until a game slot is available.
     """
-    global waiting_players, waiting_players_lock, game_in_progress, game_lock
+    global waiting_players, waiting_players_lock, game_in_progress
     
     try:
         rfile = conn.makefile('r')
@@ -88,7 +88,7 @@ def handle_waiting_player(conn, addr):
                     line = rfile.readline().strip()
                     if line.lower() == 'quit':
                         with waiting_players_lock:
-                            # Remove player from queue if they're still in it
+                            # Remove player from queue if they're still in
                             temp_queue = queue.Queue()
                             while not waiting_players.empty():
                                 player = waiting_players.get()
@@ -101,7 +101,18 @@ def handle_waiting_player(conn, addr):
                 
                 # Update position in queue
                 with waiting_players_lock:
-                    position = sum(1 for _ in range(waiting_players.qsize()) if waiting_players.queue[_][0] == conn)
+                    # Create a temporary list to find position
+                    temp_list = []
+                    while not waiting_players.empty():
+                        temp_list.append(waiting_players.get())
+                    
+                    # Find position in the list
+                    position = 0
+                    for i, player in enumerate(temp_list, 1):
+                        if player[0] == conn:
+                            position = i
+                        waiting_players.put(player)  # Put all players back in queue
+                    
                     if position == 0:  # Player is no longer in queue
                         return
                 
@@ -137,7 +148,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
     Manages multiple games in succession if players choose to play again.
     When this function returns, the connections will be closed.
     """
-    global game_in_progress, game_lock
+    global game_in_progress
     
     # Set socket timeouts for gameplay
     player1_conn.settimeout(CONNECTION_TIMEOUT)
@@ -300,7 +311,7 @@ def run_game_server():
     """
     Main server loop that handles connections and starts games.
     """
-    global waiting_players, waiting_players_lock, game_in_progress, game_lock
+    global waiting_players, waiting_players_lock, game_in_progress
     
     print(f"[INFO] Server listening on {HOST}:{PORT}")
     
@@ -318,7 +329,7 @@ def run_game_server():
                 # Check if a game is in progress
                 with game_lock:
                     if game_in_progress:
-                        # Game is in progress, add to waiting queue
+                        # Game in progress, add to waiting queue
                         threading.Thread(target=handle_waiting_player,
                                       args=(conn, addr),
                                       daemon=True).start()
@@ -326,14 +337,16 @@ def run_game_server():
                         # No game in progress, check waiting queue
                         with waiting_players_lock:
                             if waiting_players.qsize() >= 1:
-                                # Get waiting player and start game
+                                # Get waiting player
                                 player1_conn, player1_rfile, player1_wfile, player1_addr = waiting_players.get()
+                                
+                                # Start game with these two players
                                 game_in_progress = True
                                 threading.Thread(target=handle_game_session, 
                                               args=(player1_conn, conn, player1_addr, addr),
                                               daemon=True).start()
                             else:
-                                # No waiting players, add to queue
+                                # Add to waiting queue
                                 threading.Thread(target=handle_waiting_player,
                                               args=(conn, addr),
                                               daemon=True).start()
