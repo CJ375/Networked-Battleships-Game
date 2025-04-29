@@ -20,7 +20,9 @@ HOST = '127.0.0.1'
 PORT = 5001
 CONNECTION_TIMEOUT = 60  # seconds to wait for a connection
 
-# Global queue for waiting/idle players
+# Global variables for game state
+game_in_progress = False
+game_lock = threading.Lock()
 waiting_players = queue.Queue()
 waiting_players_lock = threading.Lock()
 
@@ -61,7 +63,7 @@ def handle_waiting_player(conn, addr):
     Handle a player in the waiting lobby.
     Sends waiting messages and manages the connection until a game slot is available.
     """
-    global waiting_players, waiting_players_lock
+    global waiting_players, waiting_players_lock, game_in_progress, game_lock
     
     try:
         rfile = conn.makefile('r')
@@ -74,7 +76,7 @@ def handle_waiting_player(conn, addr):
             
         # Send initial waiting message
         wfile.write(f"\n[INFO] You are in the waiting lobby. Position: {position}\n")
-        wfile.write("[INFO] You will be matched with another player when a game slot becomes available.\n")
+        wfile.write("[INFO] You will be matched with another player when the current game ends.\n")
         wfile.write("[INFO] Type 'quit' to leave the waiting lobby.\n")
         wfile.flush()
         
@@ -135,6 +137,8 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
     Manages multiple games in succession if players choose to play again.
     When this function returns, the connections will be closed.
     """
+    global game_in_progress, game_lock
+    
     # Set socket timeouts for gameplay
     player1_conn.settimeout(CONNECTION_TIMEOUT)
     player2_conn.settimeout(CONNECTION_TIMEOUT)
@@ -287,12 +291,16 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
             print("[INFO] Client connections closed. Ready for new players.")
         except:
             pass
+        
+        # Mark game as ended
+        with game_lock:
+            game_in_progress = False
 
 def run_game_server():
     """
     Main server loop that handles connections and starts games.
     """
-    global waiting_players, waiting_players_lock
+    global waiting_players, waiting_players_lock, game_in_progress, game_lock
     
     print(f"[INFO] Server listening on {HOST}:{PORT}")
     
@@ -307,21 +315,28 @@ def run_game_server():
                 conn, addr = server_socket.accept()
                 print(f"[INFO] New connection from {addr}")
                 
-                # Check if we have enough players for a game
-                with waiting_players_lock:
-                    if waiting_players.qsize() >= 1:
-                        # Get waiting player
-                        player1_conn, player1_rfile, player1_wfile, player1_addr = waiting_players.get()
-                        
-                        # Start game with these two players
-                        threading.Thread(target=handle_game_session, 
-                                      args=(player1_conn, conn, player1_addr, addr),
-                                      daemon=True).start()
-                    else:
-                        # Add to waiting queue
+                # Check if a game is in progress
+                with game_lock:
+                    if game_in_progress:
+                        # Game is in progress, add to waiting queue
                         threading.Thread(target=handle_waiting_player,
                                       args=(conn, addr),
                                       daemon=True).start()
+                    else:
+                        # No game in progress, check waiting queue
+                        with waiting_players_lock:
+                            if waiting_players.qsize() >= 1:
+                                # Get waiting player and start game
+                                player1_conn, player1_rfile, player1_wfile, player1_addr = waiting_players.get()
+                                game_in_progress = True
+                                threading.Thread(target=handle_game_session, 
+                                              args=(player1_conn, conn, player1_addr, addr),
+                                              daemon=True).start()
+                            else:
+                                # No waiting players, add to queue
+                                threading.Thread(target=handle_waiting_player,
+                                              args=(conn, addr),
+                                              daemon=True).start()
                 
             except KeyboardInterrupt:
                 print("[INFO] Server shutting down by keyboard interrupt")
