@@ -25,6 +25,8 @@ game_in_progress = False
 game_lock = threading.Lock()
 waiting_players = queue.Queue()
 waiting_players_lock = threading.Lock()
+current_game_spectators = []  # List of (conn, wfile) tuples for spectators
+spectators_lock = threading.Lock()
 
 def handle_player_disconnect(player_conn, player_wfile, player_name):
     """
@@ -142,13 +144,71 @@ def handle_waiting_player(conn, addr):
         except:
             pass
 
+def handle_spectator(conn, addr):
+    """
+    Handle a spectator connection.
+    Sends game updates to the spectator and manages their connection.
+    """
+    try:
+        rfile = conn.makefile('r')
+        wfile = conn.makefile('w')
+        
+        # Add spectator to the list
+        with spectators_lock:
+            current_game_spectators.append((conn, wfile))
+        
+        # Send welcome message
+        wfile.write("\n[INFO] You are now spectating the current game.\n")
+        wfile.write("[INFO] You will see all game updates but cannot participate.\n")
+        wfile.write("[INFO] Type 'quit' to stop spectating.\n")
+        wfile.flush()
+        
+        # Keep connection alive while game is in progress
+        while game_in_progress:
+            try:
+                # Check if spectator wants to quit
+                if rfile in select.select([rfile], [], [], 1)[0]:
+                    line = rfile.readline().strip()
+                    if line.lower() == 'quit':
+                        break
+            except (ConnectionResetError, BrokenPipeError):
+                break
+            except Exception as e:
+                print(f"[ERROR] Error handling spectator: {e}")
+                break
+                
+    except Exception as e:
+        print(f"[ERROR] Error setting up spectator: {e}")
+    finally:
+        # Remove spectator from list and close connection
+        with spectators_lock:
+            if (conn, wfile) in current_game_spectators:
+                current_game_spectators.remove((conn, wfile))
+        try:
+            conn.close()
+        except:
+            pass
+
+def notify_spectators(message):
+    """
+    Send a message to all spectators.
+    """
+    with spectators_lock:
+        for conn, wfile in current_game_spectators[:]:  # Copy list to avoid modification during iteration
+            try:
+                wfile.write(message + '\n')
+                wfile.flush()
+            except:
+                # Remove disconnected spectator
+                current_game_spectators.remove((conn, wfile))
+
 def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
     """
     Handle a game session between two connected players.
     Manages multiple games in succession if players choose to play again.
     When this function returns, the connections will be closed.
     """
-    global game_in_progress
+    global game_in_progress, current_game_spectators
     
     # Set socket timeouts for gameplay
     player1_conn.settimeout(CONNECTION_TIMEOUT)
@@ -165,8 +225,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
         while play_again:
             # Run a single game
             print("[INFO] Starting a new game between players...")
+            notify_spectators("A new game is starting!")
             try:
-                run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile)
+                run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile, notify_spectators_callback=notify_spectators)
             except ConnectionResetError:
                 # Handle disconnection during gameplay
                 if player1_conn.fileno() == -1:  # Player 1 disconnected
@@ -176,6 +237,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                         player2_wfile.flush()
                     except:
                         pass
+                    notify_spectators("Player 1 has disconnected. Player 2 wins by default!")
                 else:  # Player 2 disconnected
                     handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
                     try:
@@ -183,6 +245,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                         player1_wfile.flush()
                     except:
                         pass
+                    notify_spectators("Player 2 has disconnected. Player 1 wins by default!")
                 break
             except BrokenPipeError:
                 # Handle broken pipe (similar to connection reset)
@@ -193,6 +256,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                         player2_wfile.flush()
                     except:
                         pass
+                    notify_spectators("Player 1 has disconnected. Player 2 wins by default!")
                 else:
                     handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
                     try:
@@ -200,6 +264,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                         player1_wfile.flush()
                     except:
                         pass
+                    notify_spectators("Player 2 has disconnected. Player 1 wins by default!")
                 break
             except socket.timeout:
                 # Handle timeout during gameplay
@@ -214,10 +279,12 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                     player2_wfile.flush()
                 except:
                     pass
+                notify_spectators("Game session timed out. Game ending.")
                 break
             except Exception as e:
                 print(f"[ERROR] Unexpected error during gameplay: {e}")
                 traceback.print_exc()
+                notify_spectators(f"Game ended due to an error: {e}")
                 break
             
             # Add a small delay to let players see the final result
@@ -226,6 +293,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                 player1_wfile.flush()
                 player2_wfile.write("Game over! Please wait...\n")
                 player2_wfile.flush()
+                notify_spectators("Game over! Waiting for players to decide if they want to play again...")
             except:
                 break
             
@@ -246,6 +314,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                     player1_wfile.flush()
                     player2_wfile.write("Both players have agreed to play again. Starting a new game...\n")
                     player2_wfile.flush()
+                    notify_spectators("Both players have agreed to play again. Starting a new game...")
                     play_again = True
                 except:
                     break
@@ -257,16 +326,19 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
                         player1_wfile.flush()
                         player2_wfile.write("The other player declined to play again. Ending session.\n")
                         player2_wfile.flush()
+                        notify_spectators("Player 1 declined to play again. Game ending.")
                     elif not player2_wants_rematch:
                         player2_wfile.write("You declined to play again. Ending session.\n")
                         player2_wfile.flush()
                         player1_wfile.write("The other player declined to play again. Ending session.\n")
                         player1_wfile.flush()
+                        notify_spectators("Player 2 declined to play again. Game ending.")
                     else:
                         player1_wfile.write("Session ending due to an unexpected error.\n")
                         player1_wfile.flush()
                         player2_wfile.write("Session ending due to an unexpected error.\n")
                         player2_wfile.flush()
+                        notify_spectators("Game ending due to an unexpected error.")
                 except:
                     pass
                 play_again = False
@@ -277,6 +349,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
             player1_wfile.flush()
             player2_wfile.write("Thank you for playing! Disconnecting now.\n")
             player2_wfile.flush()
+            notify_spectators("Game has ended. Thank you for spectating!")
         except:
             pass
         print(f"[INFO] Game session ended between players at {player1_addr} and {player2_addr}")
@@ -284,16 +357,20 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
     except socket.timeout:
         handle_player_disconnect(player1_conn, player1_wfile, "Player 1")
         handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
+        notify_spectators("Game ended due to a timeout.")
     except ConnectionResetError:
         handle_player_disconnect(player1_conn, player1_wfile, "Player 1")
         handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
+        notify_spectators("Game ended due to a connection reset.")
     except BrokenPipeError:
         handle_player_disconnect(player1_conn, player1_wfile, "Player 1")
         handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
+        notify_spectators("Game ended due to a broken connection.")
     except Exception as e:
         print(f"[ERROR] Game error: {e}\n{traceback.format_exc()}")
         handle_player_disconnect(player1_conn, player1_wfile, "Player 1")
         handle_player_disconnect(player2_conn, player2_wfile, "Player 2")
+        notify_spectators(f"Game ended due to an error: {e}")
     finally:
         # Ensure connections are closed properly
         try:
@@ -302,6 +379,10 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr):
             print("[INFO] Client connections closed. Ready for new players.")
         except:
             pass
+        
+        # Clear spectators list
+        with spectators_lock:
+            current_game_spectators.clear()
         
         # Mark game as ended
         with game_lock:
@@ -329,8 +410,8 @@ def run_game_server():
                 # Check if a game is in progress
                 with game_lock:
                     if game_in_progress:
-                        # Game in progress, add to waiting queue
-                        threading.Thread(target=handle_waiting_player,
+                        # Game in progress, add as spectator
+                        threading.Thread(target=handle_spectator,
                                       args=(conn, addr),
                                       daemon=True).start()
                     else:

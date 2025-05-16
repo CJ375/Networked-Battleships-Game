@@ -62,6 +62,21 @@ def receive_messages(rfile):
                     if not board_line or board_line.strip() == "":
                         break
                     print(board_line.strip())
+            elif line == "SPECTATOR_GRID":
+                # Display both players' grids for spectators
+                print("\n[Spectator View]")
+                print("Player 1's Board:")
+                while True:
+                    board_line = rfile.readline()
+                    if not board_line or board_line.strip() == "":
+                        break
+                    print(board_line.strip())
+                print("\nPlayer 2's Board:")
+                while True:
+                    board_line = rfile.readline()
+                    if not board_line or board_line.strip() == "":
+                        break
+                    print(board_line.strip())
             else:
                 # Normal message
                 print(line)
