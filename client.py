@@ -103,12 +103,29 @@ def main():
 
     print("[INFO] Connecting to Battleship server...")
     try:
+        # Get username from user
+        username = ""
+        while not username:
+            username = input("Enter your username: ").strip()
+            if not username:
+                print("[ERROR] Username cannot be empty. Please try again.")
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
             print(f"[INFO] Connected to server at {HOST}:{PORT}")
             
             rfile = s.makefile('r')
             wfile = s.makefile('w')
+
+            # Send username to server
+            try:
+                wfile.write(f"USERNAME {username}\\n")
+                wfile.flush()
+                print(f"[INFO] Username '{username}' sent to server.")
+            except Exception as e:
+                print(f"[ERROR] Failed to send username to server: {e}")
+                running = False
+                return # Exit if username cannot be sent
 
             # Start a thread for receiving messages
             receive_thread = threading.Thread(target=receive_messages, args=(rfile,))
