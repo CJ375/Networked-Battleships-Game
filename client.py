@@ -119,7 +119,7 @@ def main():
 
             # Send username to server
             try:
-                wfile.write(f"USERNAME {username}\\n")
+                wfile.write(f"USERNAME {username}\n")
                 wfile.flush()
                 print(f"[INFO] Username '{username}' sent to server.")
             except Exception as e:
