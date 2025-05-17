@@ -8,11 +8,19 @@ This client handles both single-player and two-player modes:
 - Runs in a threaded mode to handle asynchronous server messages
 - Supports playing multiple games in succession without disconnecting
 - Provides feedback about move timeouts
+- Uses custom protocol
 """
 
 import socket
 import threading
 import time
+from protocol import (
+    receive_packet, send_packet, 
+    PACKET_TYPE_USERNAME, PACKET_TYPE_MOVE, PACKET_TYPE_CHAT,
+    PACKET_TYPE_DISCONNECT, PACKET_TYPE_RECONNECT, PACKET_TYPE_HEARTBEAT,
+    PACKET_TYPE_GAME_START, PACKET_TYPE_BOARD_UPDATE, PACKET_TYPE_GAME_END,
+    PACKET_TYPE_ERROR, PACKET_TYPE_ACK, get_packet_type_name
+)
 
 HOST = '127.0.0.1'
 PORT = 5001
@@ -20,70 +28,43 @@ PORT = 5001
 # Flag (global) indicating if the client should stop running
 running = True
 
-def receive_messages(rfile):
+def receive_messages(sock):
     """
-    Continuously receive and display messages from the server
+    Continuously receive and display messages from the server using the protocol
     """
-    
     global running
 
     while running:
         try:
-            line = rfile.readline()
-            if not line:
-                print("\n[ERROR] Server disconnected unexpectedly. Please restart the client to reconnect.")
+            # Use protocol's receive_packet instead of readline
+            valid, header, payload = receive_packet(sock)
+            
+            if not valid or not payload:
+                print("\n[ERROR] Server disconnected or sent corrupted data. Please restart the client to reconnect.")
                 running = False
                 break
-                
-            line = line.strip()
             
-            if line == "GRID":
-                # Begin reading of board lines
-                print("\n[Board]")
-                while True:
-                    board_line = rfile.readline()
-
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            elif line == "YOUR_GRID":
-                # Display player's own grid with ships
-                print("\n[Your Board]")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            elif line == "OPPONENT_GRID":
-                # Display opponent's grid (only hits/misses visible)
-                print("\n[Opponent's Board]")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            elif line == "SPECTATOR_GRID":
-                # Display both players' grids for spectators
-                print("\n[Spectator View]")
-                print("Player 1's Board:")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-                print("\nPlayer 2's Board:")
-                while True:
-                    board_line = rfile.readline()
-                    if not board_line or board_line.strip() == "":
-                        break
-                    print(board_line.strip())
-            else:
-                # Normal message
-                print(line)
-                
-                # If the message mentions a timeout, draw attention to it
-                if "timeout" in line.lower() or "timed out" in line.lower():
+            magic, seq, packet_type, data_len = header
+            payload_str = payload.decode() if isinstance(payload, bytes) else payload
+            
+            # Process different packet types
+            if packet_type == PACKET_TYPE_BOARD_UPDATE:
+                # Board updates will be sent as a formatted string payload
+                print("\n" + payload_str)
+            elif packet_type == PACKET_TYPE_GAME_START:
+                print(f"\n[GAME START] {payload_str}")
+            elif packet_type == PACKET_TYPE_GAME_END:
+                print(f"\n[GAME END] {payload_str}")
+            elif packet_type == PACKET_TYPE_ERROR:
+                print(f"\n[ERROR] {payload_str}")
+                if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
                     print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
+            elif packet_type == PACKET_TYPE_HEARTBEAT:
+                # Respond to heartbeat with ACK to maintain connection
+                send_packet(sock, PACKET_TYPE_ACK, str(seq))
+            else:
+                # Regular message (chat, etc.)
+                print(payload_str)
                 
         except ConnectionResetError:
             print("\n[ERROR] Connection to server was reset. Please restart the client to reconnect.")
@@ -110,26 +91,22 @@ def main():
             if not username:
                 print("[ERROR] Username cannot be empty. Please try again.")
 
+        # Connect to server
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
             print(f"[INFO] Connected to server at {HOST}:{PORT}")
             
-            rfile = s.makefile('r')
-            wfile = s.makefile('w')
-
-            # Send username to server
-            try:
-                wfile.write(f"USERNAME {username}\n")
-                wfile.flush()
+            # Send username using protocol
+            if send_packet(s, PACKET_TYPE_USERNAME, username):
                 print(f"[INFO] Username '{username}' sent to server.")
-            except Exception as e:
-                print(f"[ERROR] Failed to send username to server: {e}")
+            else:
+                print("[ERROR] Failed to send username to server")
                 running = False
                 return # Exit if username cannot be sent
 
             # Start a thread for receiving messages
-            receive_thread = threading.Thread(target=receive_messages, args=(rfile,))
-            receive_thread.daemon = True # This ensures that the thread will exit when the main thread exits
+            receive_thread = threading.Thread(target=receive_messages, args=(s,))
+            receive_thread.daemon = True # This ensures the thread will exit when the main thread exits
             receive_thread.start()
 
             try:
@@ -140,32 +117,29 @@ def main():
 
                         if user_input.lower() == 'quit':
                             print("[INFO] Quitting the game...")
+                            send_packet(s, PACKET_TYPE_DISCONNECT, "Quit requested by user")
                             running = False
                             break
                         
-                        # Send user input to server
-                        try:
-                            wfile.write(user_input + '\n')
-                            wfile.flush()
-                        except ConnectionResetError:
-                            print("\n[ERROR] Connection to server was reset while sending command. Please restart the client.")
-                            running = False
-                            break
-                        except BrokenPipeError:
-                            print("\n[ERROR] Connection to server was broken while sending command. Please restart the client.")
-                            running = False
-                            break
-                        except Exception as e:
-                            print(f"\n[ERROR] Failed to send command to server: {e}")
-                            running = False
-                            break
+                        # Send user input to server using the protocol
+                        # Determine packet type based on input
+                        if user_input.lower().startswith("fire ") or user_input.upper() in ["H", "V"] or any(c.isalpha() and c.upper() in "ABCDEFGHIJ" for c in user_input):
+                            # This is likely a game move (fire command or ship placement)
+                            if not send_packet(s, PACKET_TYPE_MOVE, user_input):
+                                print("[ERROR] Failed to send move to server")
+                        else:
+                            # Treat as chat/general command
+                            if not send_packet(s, PACKET_TYPE_CHAT, user_input):
+                                print("[ERROR] Failed to send message to server")
 
                     except KeyboardInterrupt:
                         print("\n[INFO] Client exiting due to keyboard interrupt.")
+                        send_packet(s, PACKET_TYPE_DISCONNECT, "Keyboard interrupt")
                         running = False
                         break
                     except EOFError:
                         print("\n[INFO] End of input reached. Exiting...")
+                        send_packet(s, PACKET_TYPE_DISCONNECT, "EOF reached")
                         running = False
                         break
                     except Exception as e:
@@ -175,6 +149,7 @@ def main():
 
             except KeyboardInterrupt:
                 print("\n[INFO] Client exiting due to keyboard interrupt.")
+                send_packet(s, PACKET_TYPE_DISCONNECT, "Keyboard interrupt")
                 running = False
             
             # Give the receive thread time to display any final messages

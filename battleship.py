@@ -22,6 +22,8 @@ SHIPS = [
     ("Destroyer", 2)
 ]
 
+# Define a constant for move timeout to match with server
+MOVE_TIMEOUT = 30  # seconds a player has to make a move
 
 class Board:
     """
@@ -403,12 +405,23 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     Includes a timeout mechanism to handle inactive players.
     
     Expects:
-      - player1_rfile/player1_wfile: File-like objects for player1
-      - player2_rfile/player2_wfile: File-like objects for player2
+      - player1_rfile/player1_wfile: File-like objects or protocol adapters for player1
+      - player2_rfile/player2_wfile: File-like objects or protocol adapters for player2
       - notify_spectators_callback: A function to call to send messages to spectators
     """
-    # Timeout settings
-    MOVE_TIMEOUT = 30  # seconds a player has to make a move
+    # Existing send_to_player and send_board_to_player functions remain the same
+    # as they now work with either file objects or our protocol adapters
+    
+    # Create spectator notification wrapper function that works with both
+    # old text protocol and new binary protocol
+    def notify_spectators_wrapper(message):
+        """
+        Wrapper around notify_spectators_callback to handle protocol conversion if needed.
+        """
+        # Call the provided spectator notification callback
+        notify_spectators_callback(message)
+    
+    # Timeout settings are defined at the module level
     
     def send_to_player(player_wfile, msg):
         try:
@@ -448,23 +461,30 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         Spectators see both boards with ships hidden.
         """
         try:
-            # Send both boards to spectators
-            notify_spectators_callback_func("SPECTATOR_GRID")
-            # Send column headers
-            notify_spectators_callback_func("  " + " ".join(str(i + 1).rjust(2) for i in range(player1_board.size)))
-            # Send Player 1's board (ships hidden)
+            # Prepare the board data as a single formatted string
+            board_data = []
+            board_data.append("SPECTATOR_GRID")
+            
+            # Add column headers
+            board_data.append("  " + " ".join(str(i + 1).rjust(2) for i in range(player1_board.size)))
+            
+            # Add Player 1's board
+            board_data.append("Player 1's Board:")
             for r in range(player1_board.size):
                 row_label = chr(ord('A') + r)
                 row_str = " ".join(player1_board.display_grid[r][c] for c in range(player1_board.size))
-                notify_spectators_callback_func(f"{row_label:2} {row_str}")
-            notify_spectators_callback_func("")
+                board_data.append(f"{row_label:2} {row_str}")
+            board_data.append("")
             
-            # Send Player 2's board (ships hidden)
+            # Add Player 2's board
+            board_data.append("Player 2's Board:")
             for r in range(player2_board.size):
                 row_label = chr(ord('A') + r)
                 row_str = " ".join(player2_board.display_grid[r][c] for c in range(player2_board.size))
-                notify_spectators_callback_func(f"{row_label:2} {row_str}")
-            notify_spectators_callback_func("")
+                board_data.append(f"{row_label:2} {row_str}")
+            
+            # Send the combined board data
+            notify_spectators_callback_func("\n".join(board_data))
         except Exception as e:
             print(f"Error sending board to spectators: {e}")
 
@@ -472,8 +492,15 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         """
         Receive input from a player with a timeout.
         Returns the input string or None if timeout occurs.
+        
+        Works with both file-like objects and protocol adapters.
         """
         try:
+            # If player_rfile is a protocol adapter (has no fileno method), use its readline method
+            if not hasattr(player_rfile, 'fileno'):
+                return player_rfile.readline().strip()
+            
+            # Otherwise use select for a standard file object
             # Get the file descriptor from the file object
             fd = player_rfile.fileno()
             # Wait for the file descriptor to be ready for reading
@@ -692,28 +719,28 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 if sunk_name:
                     send_to_player(current_wfile, f"HIT! You sank {opponent_name}\'s {sunk_name}!")
                     send_to_player(other_wfile, f"{current_player_name} fired at {guess} and sank your {sunk_name}!")
-                    notify_spectators_callback(f"{current_player_name} fired at {guess} and sank {opponent_name}\'s {sunk_name}!")
+                    notify_spectators_wrapper(f"{current_player_name} fired at {guess} and sank {opponent_name}\'s {sunk_name}!")
                 else:
                     send_to_player(current_wfile, "HIT!")
                     send_to_player(other_wfile, f"{current_player_name} fired at {guess} and scored a hit!")
-                    notify_spectators_callback(f"{current_player_name} fired at {guess} and scored a hit!")
+                    notify_spectators_wrapper(f"{current_player_name} fired at {guess} and scored a hit!")
                 
                 # Check if all ships are sunk
                 if opponent_board.all_ships_sunk():
                     # Show both boards to both players one final time
                     send_board_to_player(current_wfile, current_board, opponent_board)
                     send_board_to_player(other_wfile, opponent_board, current_board)
-                    send_board_to_spectators(current_board, opponent_board, notify_spectators_callback)
+                    send_board_to_spectators(current_board, opponent_board, notify_spectators_wrapper)
                     
                     # Send victory/defeat messages
                     send_to_player(current_wfile, f"Congratulations! You\'ve sunk all of {opponent_name}\'s ships. You win!")
                     send_to_player(other_wfile, f"Game over! {current_player_name} has sunk all your ships.")
-                    notify_spectators_callback(f"Game over! {current_player_name} has won by sinking all of {opponent_name}\'s ships!")
+                    notify_spectators_wrapper(f"Game over! {current_player_name} has won by sinking all of {opponent_name}\'s ships!")
                     return
             elif result == 'miss':
                 send_to_player(current_wfile, "MISS!")
                 send_to_player(other_wfile, f"{current_player_name} fired at {guess} and missed!")
-                notify_spectators_callback(f"{current_player_name} fired at {guess} and missed!")
+                notify_spectators_wrapper(f"{current_player_name} fired at {guess} and missed!")
             elif result == 'already_shot':
                 send_to_player(current_wfile, "You\'ve already fired at that location. Try again.")
                 # Don't switch players for an invalid move
@@ -727,7 +754,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             print("DEBUG: Result:", result, "Sunk:", sunk_name)
             
             # Send updated boards to spectators after each move
-            send_board_to_spectators(current_board, opponent_board, notify_spectators_callback)
+            send_board_to_spectators(current_board, opponent_board, notify_spectators_wrapper)
                 
         except ValueError as e:
             send_to_player(current_wfile, f"Invalid input: {e}. Try again.")
