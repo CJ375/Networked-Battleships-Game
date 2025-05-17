@@ -9,3 +9,5 @@
 *.pywz
 *.pyzw
 __pycache__/battleship.cpython-312.pyc
+testrun.py
+.DS_Store
