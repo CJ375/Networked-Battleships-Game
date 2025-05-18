@@ -9,11 +9,14 @@ This client handles both single-player and two-player modes:
 - Supports playing multiple games in succession without disconnecting
 - Provides feedback about move timeouts
 - Uses custom protocol
+- Supports reconnection to an interrupted game
 """
 
 import socket
 import threading
 import time
+import os
+import json
 from protocol import (
     receive_packet, send_packet, 
     PACKET_TYPE_USERNAME, PACKET_TYPE_MOVE, PACKET_TYPE_CHAT,
@@ -27,6 +30,40 @@ PORT = 5001
 
 # Flag (global) indicating if the client should stop running
 running = True
+
+# Store username for reconnection purposes
+current_username = ""
+
+# Get client ID from environment variable or create a unique one
+client_id = os.environ.get('BATTLESHIP_CLIENT_ID', str(int(time.time())))
+previous_connection_file = f".battleship_connection_{client_id}.json"
+
+def save_connection_info(username):
+    """Save username to a file for reconnection"""
+    try:
+        with open(previous_connection_file, 'w') as f:
+            json.dump({'username': username, 'timestamp': time.time()}, f)
+    except:
+        print("[WARNING] Could not save connection information.")
+
+def load_connection_info():
+    """Load previous username if available and not expired"""
+    try:
+        if os.path.exists(previous_connection_file):
+            with open(previous_connection_file, 'r') as f:
+                data = json.load(f)
+                
+                # Check if reconnection window is still valid (60 seconds)
+                elapsed = time.time() - data.get('timestamp', 0)
+                if elapsed <= 60:
+                    return data.get('username'), True
+                else:
+                    # Connection is too old for reconnection
+                    return data.get('username'), False
+    except:
+        pass
+    
+    return None, False
 
 def receive_messages(sock):
     """
@@ -59,6 +96,8 @@ def receive_messages(sock):
                 print(f"\n[ERROR] {payload_str}")
                 if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
                     print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
+            elif packet_type == PACKET_TYPE_RECONNECT:
+                print(f"\n[RECONNECTED] {payload_str}")
             elif packet_type == PACKET_TYPE_HEARTBEAT:
                 # Respond to heartbeat with ACK to maintain connection
                 send_packet(sock, PACKET_TYPE_ACK, str(seq))
@@ -68,10 +107,14 @@ def receive_messages(sock):
                 
         except ConnectionResetError:
             print("\n[ERROR] Connection to server was reset. Please restart the client to reconnect.")
+            print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
+            save_connection_info(current_username)
             running = False
             break
         except BrokenPipeError:
             print("\n[ERROR] Connection to server was broken. Please restart the client to reconnect.")
+            print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
+            save_connection_info(current_username)
             running = False
             break
         except Exception as e:
@@ -80,16 +123,42 @@ def receive_messages(sock):
             break
 
 def main():
-    global running
+    global running, current_username
 
     print("[INFO] Connecting to Battleship server...")
     try:
-        # Get username from user
-        username = ""
-        while not username:
-            username = input("Enter your username: ").strip()
-            if not username:
-                print("[ERROR] Username cannot be empty. Please try again.")
+        # Check for previous connection data for reconnection
+        previous_username, is_recent = load_connection_info()
+        
+        # Only prompt for reconnection if the previous connection was recent
+        if previous_username and is_recent:
+            print(f"[INFO] Recent disconnection found for username: {previous_username}")
+            reconnect = input(f"Would you like to reconnect as {previous_username}? (y/n): ").strip().lower()
+            if reconnect == 'y':
+                username = previous_username
+                print(f"[INFO] Reconnecting as {username}...")
+            else:
+                # Delete the connection file if not reconnecting
+                try:
+                    os.remove(previous_connection_file)
+                except:
+                    pass
+                    
+                username = ""
+                while not username:
+                    username = input("Enter your username: ").strip()
+                    if not username:
+                        print("[ERROR] Username cannot be empty. Please try again.")
+        else:
+            # Get username from user
+            username = ""
+            while not username:
+                username = input("Enter your username: ").strip()
+                if not username:
+                    print("[ERROR] Username cannot be empty. Please try again.")
+        
+        # Store username globally for reconnection
+        current_username = username
 
         # Connect to server
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -103,6 +172,9 @@ def main():
                 print("[ERROR] Failed to send username to server")
                 running = False
                 return # Exit if username cannot be sent
+
+            # Save connection info for potential reconnection
+            save_connection_info(username)
 
             # Start a thread for receiving messages
             receive_thread = threading.Thread(target=receive_messages, args=(s,))
@@ -118,6 +190,11 @@ def main():
                         if user_input.lower() == 'quit':
                             print("[INFO] Quitting the game...")
                             send_packet(s, PACKET_TYPE_DISCONNECT, "Quit requested by user")
+                            # Remove connection file when quitting deliberately
+                            try:
+                                os.remove(previous_connection_file)
+                            except:
+                                pass
                             running = False
                             break
                         
@@ -135,6 +212,11 @@ def main():
                     except KeyboardInterrupt:
                         print("\n[INFO] Client exiting due to keyboard interrupt.")
                         send_packet(s, PACKET_TYPE_DISCONNECT, "Keyboard interrupt")
+                        # Remove connection file on clean exit
+                        try:
+                            os.remove(previous_connection_file)
+                        except:
+                            pass
                         running = False
                         break
                     except EOFError:
