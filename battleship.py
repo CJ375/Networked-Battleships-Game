@@ -433,25 +433,26 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
         try:
             # First send player's own board (with ships visible)
-            player_wfile.write("YOUR_GRID\n")
+            player_wfile.write("Your Grid:\n")
             player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
             for r in range(own_board.size):
                 row_label = chr(ord('A') + r)
                 row_str = " ".join(own_board.hidden_grid[r][c] for c in range(own_board.size))
                 player_wfile.write(f"{row_label:2} {row_str}\n")
             player_wfile.write('\n')
+            player_wfile.flush()
             
             # Then send opponent's board (only hits/misses visible) if provided
             if opponent_board:
-                player_wfile.write("OPPONENT_GRID\n")
+                player_wfile.write("Opponent's Grid:\n")
                 player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
                 for r in range(opponent_board.size):
                     row_label = chr(ord('A') + r)
                     row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
                     player_wfile.write(f"{row_label:2} {row_str}\n")
                 player_wfile.write('\n')
+                player_wfile.flush()
             
-            player_wfile.flush()
         except Exception as e:
             print(f"Error sending board to player: {e}")
 
@@ -463,28 +464,28 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         try:
             # Prepare the board data as a single formatted string
             board_data = []
-            board_data.append("SPECTATOR_GRID")
+            board_data.append("SPECTATOR_GRID\n")
             
             # Add column headers
-            board_data.append("  " + " ".join(str(i + 1).rjust(2) for i in range(player1_board.size)))
+            board_data.append("  " + " ".join(str(i + 1).rjust(2) for i in range(player1_board.size)) + "\n")
             
             # Add Player 1's board
-            board_data.append("Player 1's Board:")
+            board_data.append("Player 1's Board:\n")
             for r in range(player1_board.size):
                 row_label = chr(ord('A') + r)
                 row_str = " ".join(player1_board.display_grid[r][c] for c in range(player1_board.size))
-                board_data.append(f"{row_label:2} {row_str}")
-            board_data.append("")
+                board_data.append(f"{row_label:2} {row_str}\n")
+            board_data.append("\n")
             
             # Add Player 2's board
-            board_data.append("Player 2's Board:")
+            board_data.append("Player 2's Board:\n")
             for r in range(player2_board.size):
                 row_label = chr(ord('A') + r)
                 row_str = " ".join(player2_board.display_grid[r][c] for c in range(player2_board.size))
-                board_data.append(f"{row_label:2} {row_str}")
+                board_data.append(f"{row_label:2} {row_str}\n")
             
             # Send the combined board data
-            notify_spectators_callback_func("\n".join(board_data))
+            notify_spectators_callback_func("".join(board_data))
         except Exception as e:
             print(f"Error sending board to spectators: {e}")
 
@@ -495,10 +496,24 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         
         Works with both file-like objects and protocol adapters.
         """
+        max_attempts = 3
+        attempt = 0
+        
         try:
             # If player_rfile is a protocol adapter (has no fileno method), use its readline method
             if not hasattr(player_rfile, 'fileno'):
-                return player_rfile.readline().strip()
+                while attempt < max_attempts:
+                    response = player_rfile.readline().strip()
+                    # Handle empty responses - this happens when the adapter receives
+                    # a packet that doesn't translate to a valid game input
+                    if response:
+                        return response
+                    
+                    time.sleep(0.1)
+                    attempt += 1
+                
+                # If we get here, we've tried multiple times with no valid response
+                return None
             
             # Otherwise use select for a standard file object
             # Get the file descriptor from the file object
@@ -513,7 +528,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 return None
         except Exception as e:
             print(f"Error receiving from player: {e}")
-            return "quit"  # Force quit on read error
+            return None
     
     def handle_ship_placement(player_rfile, player_wfile, player_board, player_name):
         """
@@ -532,13 +547,17 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
             send_board_to_player(player_wfile, player_board)
             return True
+
+        choice = choice.upper()[0] if choice else ""
         
-        if choice.upper() == 'M':
+        if choice == 'M':
             # Manual placement
             for ship_name, ship_size in SHIPS:
                 placed = False
                 while not placed:
                     # Show current board state
+                    send_board_to_player(player_wfile, player_board)
+                    send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
                     send_to_player(player_wfile, "Enter starting coordinate (e.g. A1):")
                     coord_str = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
                     
@@ -570,10 +589,13 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     try:
                         row, col = parse_coordinate(coord_str)
                         
+                        # Normalize the orientation string
+                        orientation_str = orientation_str.upper()[0] if orientation_str else ""
+                        
                         # Convert orientation_str to 0 (horizontal) or 1 (vertical)
-                        if orientation_str.upper() == 'H':
+                        if orientation_str == 'H':
                             orientation = 0
-                        elif orientation_str.upper() == 'V':
+                        elif orientation_str == 'V':
                             orientation = 1
                         else:
                             send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
@@ -595,6 +617,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
             
             send_to_player(player_wfile, "All ships placed successfully!")
+            send_board_to_player(player_wfile, player_board)
             return True
         else:
             # Random placement (any non-M input)

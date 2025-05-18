@@ -59,6 +59,8 @@ class ProtocolAdapter:
         self.conn = conn
         self.username = username
         self.buffer = []
+        self.last_packet_type = None
+        self.grid_mode = False
         
     def readline(self):
         """Read a line from the buffer or wait for a new packet"""
@@ -72,8 +74,18 @@ class ProtocolAdapter:
         payload_str = payload.decode() if isinstance(payload, bytes) else payload
         magic, seq, packet_type, data_len = header
         
+        # Save the last packet type
+        self.last_packet_type = packet_type
+        
+        # Handle different packet types
         if packet_type == PACKET_TYPE_MOVE:
             return payload_str + "\n"
+        elif packet_type == PACKET_TYPE_CHAT:
+            # Also support chat messages for selections like 'M' or 'R' for ship placement
+            if payload_str.upper() in ['M', 'R', 'H', 'V', 'Y', 'N', 'YES', 'NO']:
+                return payload_str + "\n"
+            else:
+                return "\n"
         elif packet_type == PACKET_TYPE_DISCONNECT:
             raise ConnectionResetError("Player disconnected")
         else:
@@ -82,8 +94,15 @@ class ProtocolAdapter:
             
     def write(self, msg):
         """Write a message to be sent as a packet"""
-        if msg.startswith("YOUR_GRID\n") or msg.startswith("OPPONENT_GRID\n") or msg.startswith("SPECTATOR_GRID\n"):
-            # Queue grid updates to be sent as a single packet
+        if msg.strip() == "Your Grid:" or msg.strip() == "Opponent's Grid:" or msg.strip() == "SPECTATOR_GRID":
+            self.grid_mode = True
+            self.buffer = [msg]
+        elif self.grid_mode and (msg.strip() == "" or msg == "\n"):
+            # Empty line after grid - exit grid mode and send the accumulated grid
+            self.grid_mode = False
+            self.flush()
+        elif self.grid_mode:
+            # In grid mode, accumulate lines
             self.buffer.append(msg)
         else:
             # Regular message
@@ -350,6 +369,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
     player1_adapter = ProtocolAdapter(player1_conn, player1_username)
     player2_adapter = ProtocolAdapter(player2_conn, player2_username)
     
+    # Avoiding circular imports - caused errors before
+    from battleship import Board, BOARD_SIZE
+    
     # Keep track of player boards for reconnection
     player1_board = None
     player2_board = None
@@ -366,11 +388,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
             send_packet(player2_conn, PACKET_TYPE_GAME_START, f"Starting game against {player1_username}")
             
             try:
-                # Create new board objects for this game
-                from battleship import Board, BOARD_SIZE
-                player1_board = Board(BOARD_SIZE)
-                player2_board = Board(BOARD_SIZE)
+                # Create new board objects for this game 
                 
+                # Run the game - create the board objects internally
                 run_two_player_game(player1_adapter, player1_adapter, player2_adapter, player2_adapter, notify_spectators_callback=notify_spectators)
             except ConnectionResetError:
                 # Handle disconnection during gameplay
@@ -380,8 +400,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                         disconnected_players[player1_username] = {
                             'disconnect_time': time.time(),
                             'opponent_username': player2_username,
-                            'board': player1_board,
-                            'opponent_board': player2_board
+                            'opponent_conn': player2_conn
                         }
                     
                     handle_player_disconnect(player1_conn, player1_username)
@@ -439,8 +458,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                         disconnected_players[player2_username] = {
                             'disconnect_time': time.time(),
                             'opponent_username': player1_username,
-                            'board': player2_board,
-                            'opponent_board': player1_board
+                            'opponent_conn': player1_conn
                         }
                     
                     handle_player_disconnect(player2_conn, player2_username)
@@ -478,7 +496,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                                     
                             break
                             
-                        time.sleep(1)  # Check every second
+                        time.sleep(1)
                         
                     # If still not reconnected after timeout, player1 wins
                     with active_usernames_lock:

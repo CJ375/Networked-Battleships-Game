@@ -76,8 +76,13 @@ def receive_messages(sock):
             # Use protocol's receive_packet instead of readline
             valid, header, payload = receive_packet(sock)
             
-            if not valid or not payload:
-                print("\n[ERROR] Server disconnected or sent corrupted data. Please restart the client to reconnect.")
+            if not valid:
+                print("\n[ERROR] Server sent corrupted data. Please restart the client to reconnect.")
+                running = False
+                break
+                
+            if payload is None:
+                print("\n[ERROR] Server disconnected. Please restart the client to reconnect.")
                 running = False
                 break
             

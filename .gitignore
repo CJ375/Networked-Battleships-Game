@@ -8,6 +8,7 @@
 *.pyz
 *.pywz
 *.pyzw
+*.json
 __pycache__/battleship.cpython-312.pyc
 testrun.py
 .DS_Store
