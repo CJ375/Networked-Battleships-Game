@@ -230,13 +230,19 @@ class Board:
         # Decide which grid to print
         grid_to_print = self.hidden_grid if show_hidden_board else self.display_grid
 
-        # Column headers (1 .. N)
-        print("  " + "".join(str(i + 1).rjust(2) for i in range(self.size)))
+        # Column headers
+        header = "   "
+        for i in range(self.size):
+            header += f"{i+1}".center(3)
+        print(header)
+        
         # Each row labeled with A, B, C, ...
         for r in range(self.size):
             row_label = chr(ord('A') + r)
-            row_str = " ".join(grid_to_print[r][c] for c in range(self.size))
-            print(f"{row_label:2} {row_str}")
+            row_str = ""
+            for c in range(self.size):
+                row_str += grid_to_print[r][c].center(3)
+            print(f"{row_label}  {row_str}")
 
 
 def parse_coordinate(coord_str):
@@ -434,22 +440,42 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         try:
             # First send player's own board (with ships visible)
             player_wfile.write("Your Grid:\n")
-            player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(own_board.size)) + '\n')
+            
+            # Column headers
+            header = "   "
+            for i in range(own_board.size):
+                header += f"{i+1}".center(3)
+            player_wfile.write(header + "\n")
+            
+            # Generate rows with proper spacing
             for r in range(own_board.size):
                 row_label = chr(ord('A') + r)
-                row_str = " ".join(own_board.hidden_grid[r][c] for c in range(own_board.size))
-                player_wfile.write(f"{row_label:2} {row_str}\n")
+                row_str = ""
+                for c in range(own_board.size):
+                    row_str += own_board.hidden_grid[r][c].center(3)
+                player_wfile.write(f"{row_label}  {row_str}\n")
+            
             player_wfile.write('\n')
             player_wfile.flush()
             
             # Then send opponent's board (only hits/misses visible) if provided
             if opponent_board:
                 player_wfile.write("Opponent's Grid:\n")
-                player_wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(opponent_board.size)) + '\n')
+                
+                # Column headers
+                header = "   "
+                for i in range(opponent_board.size):
+                    header += f"{i+1}".center(3) 
+                player_wfile.write(header + "\n")
+                
+                # Generate rows
                 for r in range(opponent_board.size):
                     row_label = chr(ord('A') + r)
-                    row_str = " ".join(opponent_board.display_grid[r][c] for c in range(opponent_board.size))
-                    player_wfile.write(f"{row_label:2} {row_str}\n")
+                    row_str = ""
+                    for c in range(opponent_board.size):
+                        row_str += opponent_board.display_grid[r][c].center(3)
+                    player_wfile.write(f"{row_label}  {row_str}\n")
+                
                 player_wfile.write('\n')
                 player_wfile.flush()
             
@@ -466,23 +492,39 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             board_data = []
             board_data.append("SPECTATOR_GRID\n")
             
-            # Add column headers
-            board_data.append("  " + " ".join(str(i + 1).rjust(2) for i in range(player1_board.size)) + "\n")
-            
             # Add Player 1's board
             board_data.append("Player 1's Board:\n")
+            
+            # Column headers
+            header = "   "
+            for i in range(player1_board.size):
+                header += f"{i+1}".center(3)
+            board_data.append(header + "\n")
+            
             for r in range(player1_board.size):
                 row_label = chr(ord('A') + r)
-                row_str = " ".join(player1_board.display_grid[r][c] for c in range(player1_board.size))
-                board_data.append(f"{row_label:2} {row_str}\n")
+                row_str = ""
+                for c in range(player1_board.size):
+                    row_str += player1_board.display_grid[r][c].center(3)
+                board_data.append(f"{row_label}  {row_str}\n")
             board_data.append("\n")
             
             # Add Player 2's board
             board_data.append("Player 2's Board:\n")
+            
+            # Column headers
+            header = "   "
+            for i in range(player2_board.size):
+                header += f"{i+1}".center(3)
+            board_data.append(header + "\n")
+            
             for r in range(player2_board.size):
                 row_label = chr(ord('A') + r)
-                row_str = " ".join(player2_board.display_grid[r][c] for c in range(player2_board.size))
-                board_data.append(f"{row_label:2} {row_str}\n")
+                row_str = ""
+                for c in range(player2_board.size):
+                    row_str += player2_board.display_grid[r][c].center(3)
+                board_data.append(f"{row_label}  {row_str}\n")
+            board_data.append("\n")
             
             # Send the combined board data
             notify_spectators_callback_func("".join(board_data))
@@ -512,11 +554,8 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     time.sleep(0.1)
                     attempt += 1
                 
-                # If we get here, we've tried multiple times with no valid response
                 return None
             
-            # Otherwise use select for a standard file object
-            # Get the file descriptor from the file object
             fd = player_rfile.fileno()
             # Wait for the file descriptor to be ready for reading
             ready, _, _ = select.select([fd], [], [], timeout_secs)
@@ -601,7 +640,6 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                             send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
                             continue
                         
-                        # Check if we can place the ship
                         if player_board.can_place_ship(row, col, ship_size, orientation):
                             occupied_positions = player_board.do_place_ship(row, col, ship_size, orientation)
                             player_board.placed_ships.append({
@@ -809,3 +847,4 @@ def handle_spectator(conn, addr, spectators):
 if __name__ == "__main__":
     # Optional: run this file as a script to test single-player mode
     run_single_player_game_locally()
+
