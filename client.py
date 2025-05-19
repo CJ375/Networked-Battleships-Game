@@ -146,6 +146,9 @@ class BattleshipGUI(tk.Tk):
         self.spectator_player1_username = None
         self.spectator_player2_username = None
 
+        self.last_fired_coord = None
+        self.awaiting_shot_result = False
+
         # Board and cell dimensions
         self.board_size = 10
         self.cell_size = 30
@@ -279,7 +282,7 @@ class BattleshipGUI(tk.Tk):
     def draw_grid_lines(self, canvas):
         # Draw column labels (1-10)
         for i in range(self.board_size):
-            x = (i + 1.5) * self.cell_size 
+            x = (i + 1.5) * self.cell_size
             y = self.cell_size / 2
             canvas.create_text(x, y, text=str(i + 1))
 
@@ -288,19 +291,6 @@ class BattleshipGUI(tk.Tk):
             x = self.cell_size / 2
             y = (i + 1.5) * self.cell_size
             canvas.create_text(x, y, text=chr(ord('A') + i))
-        
-        grid_origin_x = self.cell_size
-        grid_origin_y = self.cell_size
-
-        for i in range(self.board_size + 1):
-            # Vertical lines
-            x0, y0 = grid_origin_x + i * self.cell_size, grid_origin_y
-            x1, y1 = grid_origin_x + i * self.cell_size, grid_origin_y + self.board_size * self.cell_size
-            canvas.create_line(x0, y0, x1, y1)
-            # Horizontal lines
-            x0, y0 = grid_origin_x, grid_origin_y + i * self.cell_size
-            x1, y1 = grid_origin_x + self.board_size * self.cell_size, grid_origin_y + i * self.cell_size
-            canvas.create_line(x0, y0, x1, y1)
         
         canvas.config(width=self.cell_size * (self.board_size + 1), height=self.cell_size * (self.board_size + 1))
 
@@ -329,7 +319,11 @@ class BattleshipGUI(tk.Tk):
         coord = self._canvas_coord_to_grid_coord(event.x, event.y)
         if coord and self.sock:
             self.log_message(f"[ACTION] Firing at {coord} on opponent's board (from click).")
-            send_packet(self.sock, PACKET_TYPE_MOVE, coord) 
+            if send_packet(self.sock, PACKET_TYPE_MOVE, coord):
+                self.last_fired_coord = coord
+                self.awaiting_shot_result = True
+            else:
+                self.log_message("[ERROR] Failed to send fire command.")
 
     def _on_player_board_click(self, event):
         if not self.is_placing_ships or self.is_spectator:
@@ -569,6 +563,8 @@ class BattleshipGUI(tk.Tk):
         if packet_type == PACKET_TYPE_BOARD_UPDATE:
             self.log_message("\n" + payload_str) 
             self.update_boards_from_string(payload_str)
+            self.awaiting_shot_result = False
+            self.last_fired_coord = None
             
             if self.is_placing_ships and "All ships have been placed" in payload_str :
                  self._toggle_ship_placement_ui(show=False)
@@ -605,20 +601,51 @@ class BattleshipGUI(tk.Tk):
         elif packet_type == PACKET_TYPE_CHAT:
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
+                self.log_message(payload_str)
+                self.chat_display.see(tk.END)
+                return
+
             elif "Place your" in payload_str and "cells)." in payload_str and self.username in payload_str:
-                # E.g.,: "Player <username>, place your Carrier (5 cells)."
                 self._start_manual_ship_placement(payload_str)
+                self.log_message(payload_str)
+                self.chat_display.see(tk.END)
+                return
+            
             elif "All ships have been placed" in payload_str:
                 self.log_message(payload_str)
                 if self.is_placing_ships:
                     self._toggle_ship_placement_ui(show=False)
             elif "Invalid placement. Try again" in payload_str:
                 self.log_message(f"[SERVER] {payload_str}")
-                # Keep placement UI open for user to retry.
                 self.selected_coord_label.config(text="Selected Start: Invalid!")
             elif "already contains a ship" in payload_str:
                  self.log_message(f"[SERVER] {payload_str}")
                  self.selected_coord_label.config(text="Selected Start: Overlap!")
+
+            optimistic_update_performed = False
+            if self.awaiting_shot_result and self.last_fired_coord and not self.is_spectator:
+                stripped_payload = payload_str.strip()
+                shot_resolved = False
+
+                if stripped_payload.startswith("Hit") or \
+                   stripped_payload.startswith("You hit") or \
+                   ("sank" in stripped_payload.lower() and "you" in stripped_payload.lower()):
+                    self._optimistically_update_opponent_cell(self.last_fired_coord, 'X')
+                    shot_resolved = True
+                    optimistic_update_performed = True
+                elif stripped_payload.startswith("Miss") or \
+                     stripped_payload.startswith("You missed"):
+                    self._optimistically_update_opponent_cell(self.last_fired_coord, 'o')
+                    shot_resolved = True
+                    optimistic_update_performed = True
+                elif "already fired" in stripped_payload.lower() or \
+                     "invalid coordinate" in stripped_payload.lower() or \
+                     "not your turn" in stripped_payload.lower():
+                    shot_resolved = True 
+                
+                if shot_resolved:
+                    self.awaiting_shot_result = False
+                    self.last_fired_coord = None
 
             is_spectator_status_msg = False
             if self.is_spectator and "Player 1:" in payload_str and "Player 2:" in payload_str and "Game State:" in payload_str:
@@ -647,28 +674,40 @@ class BattleshipGUI(tk.Tk):
                     self.log_message(f"[DEBUG] Spectator names updated: P1='{self.spectator_player1_username}', P2='{self.spectator_player2_username}'")
                 self.log_message(payload_str)
                 is_spectator_status_msg = True
+            
+            if not optimistic_update_performed and not is_spectator_status_msg:
+                is_placement_prompt = ("Would you like to place ships manually" in payload_str or
+                                     ("Place your" in payload_str and "cells)." in payload_str) or
+                                     "All ships have been placed" in payload_str or
+                                     "Invalid placement. Try again" in payload_str or
+                                     "already contains a ship" in payload_str)
 
-            if not is_spectator_status_msg:
-                if "Spectator@" in payload_str and payload_str.startswith("[CHAT]"):
-                    try:
-                        parts = payload_str.split(":", 2)
-                        sender_info_part = parts[0].replace("[CHAT]", "").strip()
-                        message_part = parts[1].strip() if len(parts) == 2 else (parts[2].strip() if len(parts) > 2 else "")
-                        if "Spectator@" in sender_info_part:
-                            spectator_name = sender_info_part.split("@")[0].strip()
-                            formatted_message = f"{spectator_name} (spectator): {message_part}"
-                            self.log_message(f"\n{formatted_message}")
-                        else:
-                            self.log_message(f"\n{payload_str}")
-                    except IndexError:
-                         self.log_message(f"\n{payload_str}")
-                else:
-                    self.log_message(payload_str)
+                if not is_placement_prompt:
+                    if "Spectator@" in payload_str and payload_str.startswith("[CHAT]"):
+                        try:
+                            parts = payload_str.split(":", 2) 
+                            sender_info_part = parts[0].replace("[CHAT]", "").strip() 
+                            message_part = parts[1].strip() if len(parts) == 2 else (parts[2].strip() if len(parts) > 2 else "")
+                            if "Spectator@" in sender_info_part:
+                                spectator_name = sender_info_part.split("@")[0].strip() 
+                                formatted_message = f"{spectator_name} (spectator): {message_part}"
+                                self.log_message(f"\n{formatted_message}")
+                            else:
+                                self.log_message(f"\n{payload_str}") 
+                        except IndexError:
+                             self.log_message(f"\n{payload_str}") 
+                    else:
+                        self.log_message(payload_str) 
+
+            if self.awaiting_shot_result and self.username in payload_str and "your turn" in payload_str.lower():
+                self.awaiting_shot_result = False
+                self.last_fired_coord = None
+
         else:
             self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
             self.log_message(payload_str)
         
-        self.chat_display.see(tk.END) 
+        self.chat_display.see(tk.END)
 
     def update_boards_from_string(self, board_string):
         self.log_message("[GUI Board Update Triggered]")
@@ -756,7 +795,6 @@ class BattleshipGUI(tk.Tk):
             for line in lines:
                 line_strip = line.strip()
                 if not line_strip:
-                    current_parsing_grid = None
                     continue
 
                 if "Your Grid:" in line_strip:
@@ -800,56 +838,63 @@ class BattleshipGUI(tk.Tk):
 
         grid_origin_x = self.cell_size
         grid_origin_y = self.cell_size
-        padding = 3 # Small padding for elements within cells
-        dot_radius_factor = 0.3 # Factor of cell_size for dot radius
+        
+        base_dot_radius = self.cell_size * 0.15
+        ship_ring_outer_radius = self.cell_size * 0.30
+        ship_ring_thickness = self.cell_size * 0.05
+        miss_dot_radius = self.cell_size * 0.25
+        hit_x_padding = self.cell_size * 0.2
 
-        # Define base cell background
-        canvas_bg = canvas.cget('bg')
-        water_bg_color = "#4682B4"
+        water_bg_color = "#4682B4" 
 
         for r, row_data in enumerate(grid_data):
-            if r >= self.board_size: continue 
+            if r >= self.board_size: continue
             for c, cell_char in enumerate(row_data):
                 if c >= self.board_size: continue
 
-                x0 = grid_origin_x + c * self.cell_size
-                y0 = grid_origin_y + r * self.cell_size
-                x1 = x0 + self.cell_size
-                y1 = y0 + self.cell_size
+                x0_rect = grid_origin_x + c * self.cell_size
+                y0_rect = grid_origin_y + r * self.cell_size
+                x1_rect = x0_rect + self.cell_size
+                y1_rect = y0_rect + self.cell_size
                 
-                # Draw a base rectangle for the cell
-                canvas.create_rectangle(x0, y0, x1, y1, fill=water_bg_color, outline='black', tags="cells")
+                center_x = x0_rect + self.cell_size / 2
+                center_y = y0_rect + self.cell_size / 2
 
-                center_x = x0 + self.cell_size / 2
-                center_y = y0 + self.cell_size / 2
-                radius = self.cell_size * dot_radius_factor
+                #Draw common cell background
+                canvas.create_rectangle(x0_rect, y0_rect, x1_rect, y1_rect, fill=water_bg_color, outline=water_bg_color, tags="cells")
 
-                if cell_char == '.': # Water
-                    pass
+                # 2. Pre-populate with a base dot for all cells initially (very light gray)
+                canvas.create_oval(center_x - base_dot_radius, center_y - base_dot_radius,
+                                    center_x + base_dot_radius, center_y + base_dot_radius,
+                                    fill='#E0E0E0', outline='#E0E0E0', tags="cells") # Light gray for base dot
 
-                elif cell_char == 'S': # Ship
-                    canvas.create_rectangle(x0 + padding, y0 + padding, 
-                                            x1 - padding, y1 - padding, 
-                                            fill='darkgray', outline='black', width=1, tags="cells")
+                # 3. Draw specific markers based on cell_char
+                if cell_char == 'S': # Ship
+                    # Outer circle of the ring
+                    canvas.create_oval(center_x - ship_ring_outer_radius, center_y - ship_ring_outer_radius,
+                                        center_x + ship_ring_outer_radius, center_y + ship_ring_outer_radius,
+                                        fill='purple', outline='purple', tags="cells")
+                    # Inner circle
+                    canvas.create_oval(center_x - (ship_ring_outer_radius - ship_ring_thickness), 
+                                        center_y - (ship_ring_outer_radius - ship_ring_thickness),
+                                        center_x + (ship_ring_outer_radius - ship_ring_thickness), 
+                                        center_y + (ship_ring_outer_radius - ship_ring_thickness),
+                                        fill='purple', outline='purple', tags="cells")
+
 
                 elif cell_char == 'o': # Miss
-                    # Draw miss on top of the water_bg_color
-                    canvas.create_oval(center_x - radius, center_y - radius, 
-                                        center_x + radius, center_y + radius, 
+                    canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
+                                        center_x + miss_dot_radius, center_y + miss_dot_radius,
                                         fill='white', outline='white', tags="cells")
 
                 elif cell_char == 'X': # Hit
-                    canvas.create_rectangle(x0, y0, x1, y1, fill='#DC143C', outline='black', tags="cells")
-                    # Draw an X on top
-                    canvas.create_line(x0 + padding*2, y0 + padding*2, 
-                                        x1 - padding*2, y1 - padding*2, 
-                                        fill='black', width=3, tags="cells")
-                    canvas.create_line(x0 + padding*2, y1 - padding*2, 
-                                        x1 - padding*2, y0 + padding*2, 
-                                        fill='black', width=3, tags="cells")
-                
-                elif cell_char == '?': # Unknown (opponent's board before reveal)
-                    canvas.create_rectangle(x0, y0, x1, y1, fill='#D3D3D3', outline='black', tags="cells") # LightGray
+                    
+                    canvas.create_line(x0_rect + hit_x_padding, y0_rect + hit_x_padding,
+                                        x1_rect - hit_x_padding, y1_rect - hit_x_padding,
+                                        fill='#DC143C', width=3, tags="cells")
+                    canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
+                                        x1_rect - hit_x_padding, y0_rect + hit_x_padding,
+                                        fill='#DC143C', width=3, tags="cells")
 
 
     def _send_input(self, event=None): 
@@ -891,14 +936,18 @@ class BattleshipGUI(tk.Tk):
             packet_to_send_type = PACKET_TYPE_CHAT 
             message_to_send = user_input 
 
-        if self.sock and send_packet(self.sock, packet_to_send_type, message_to_send):
-            if packet_to_send_type == PACKET_TYPE_CHAT:
-                display_name = self.username
-                if self.is_spectator:
-                    display_name += " (spectator)"
-                self.log_message(f"\n{display_name}: {user_input}") 
-        else:
-            self.log_message("[ERROR] Failed to send message to server.")
+        if self.sock:
+            if send_packet(self.sock, packet_to_send_type, message_to_send):
+                if packet_to_send_type == PACKET_TYPE_CHAT:
+                    display_name = self.username
+                    if self.is_spectator:
+                        display_name += " (spectator)"
+                    self.log_message(f"\n{display_name}: {user_input}")
+                elif packet_to_send_type == PACKET_TYPE_MOVE and coord_match:
+                    self.last_fired_coord = message_to_send
+                    self.awaiting_shot_result = True
+            else:
+                self.log_message("[ERROR] Failed to send message to server.")
 
     def log_message(self, message):
         if self.chat_display.winfo_exists():
@@ -933,6 +982,65 @@ class BattleshipGUI(tk.Tk):
 
         if self.winfo_exists(): # Check if window still exists before destroying
             self.destroy()
+
+    def _optimistically_update_opponent_cell(self, coord_str, cell_char):
+        if not coord_str: return
+        self.log_message(f"[OPTIMISTIC] Trying to update {coord_str} to {cell_char} on opponent board.")
+        try:
+            row_char_upper = coord_str[0].upper()
+            if not ('A' <= row_char_upper <= 'J'):
+                self.log_message(f"[OPTIMISTIC FAIL] Invalid row char: {coord_str[0]}")
+                return
+
+            row = ord(row_char_upper) - ord('A')
+            col_str = coord_str[1:]
+            if not col_str.isdigit():
+                self.log_message(f"[OPTIMISTIC FAIL] Invalid col string: {col_str}")
+                return
+            col = int(col_str) - 1
+
+            if not (0 <= row < self.board_size and 0 <= col < self.board_size):
+                self.log_message(f"[OPTIMISTIC FAIL] Coord out of bounds: r{row} c{col}")
+                return
+        except Exception as e:
+            self.log_message(f"[OPTIMISTIC FAIL] Error parsing coord '{coord_str}': {e}")
+            return
+
+        canvas = self.opponent_board_canvas
+        grid_origin_x = self.cell_size
+        grid_origin_y = self.cell_size
+        base_dot_radius = self.cell_size * 0.15
+        miss_dot_radius = self.cell_size * 0.25
+        hit_x_padding = self.cell_size * 0.2
+        water_bg_color = "#4682B4"
+
+        x0_rect = grid_origin_x + col * self.cell_size
+        y0_rect = grid_origin_y + row * self.cell_size
+        x1_rect = x0_rect + self.cell_size
+        y1_rect = y0_rect + self.cell_size
+        center_x = x0_rect + self.cell_size / 2
+        center_y = y0_rect + self.cell_size / 2
+
+        # Redraw the cell background and base dot
+        canvas.create_rectangle(x0_rect, y0_rect, x1_rect, y1_rect, fill=water_bg_color, outline=water_bg_color, tags="cells")
+        canvas.create_oval(center_x - base_dot_radius, center_y - base_dot_radius,
+                            center_x + base_dot_radius, center_y + base_dot_radius,
+                            fill='#E0E0E0', outline='#E0E0E0', tags="cells")
+
+        if cell_char == 'X':
+            canvas.create_line(x0_rect + hit_x_padding, y0_rect + hit_x_padding,
+                                x1_rect - hit_x_padding, y1_rect - hit_x_padding,
+                                fill='#DC143C', width=3, tags="cells")
+            canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
+                                x1_rect - hit_x_padding, y0_rect + hit_x_padding,
+                                fill='#DC143C', width=3, tags="cells")
+            self.log_message(f"[OPTIMISTIC DRAW] Drew 'X' at {coord_str} (r{row},c{col})")
+        elif cell_char == 'o':
+            canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
+                                center_x + miss_dot_radius, center_y + miss_dot_radius,
+                                fill='white', outline='white', tags="cells")
+            self.log_message(f"[OPTIMISTIC DRAW] Drew 'o' at {coord_str} (r{row},c{col})")
+
 
 # Dialog for Reconnection
 class ReconnectionDialog(simpledialog.Dialog):
