@@ -38,7 +38,7 @@ game_in_progress = False
 game_lock = threading.Lock()
 waiting_players = queue.Queue()
 waiting_players_lock = threading.Lock()
-current_game_spectators = []  # List of (conn, player_info) tuples for spectators
+current_game_spectators = []  # List of spectator connections
 spectators_lock = threading.Lock()
 
 # Track usernames and disconnected players for reconnection
@@ -80,6 +80,43 @@ class RealGame: # This is a real game object for players when a game is in progr
 # Initialize with a dummy game
 current_game = DummyGame()
 
+# Global chat system
+def broadcast_chat_message(sender_username, message):
+    """
+    Broadcast a chat message to all connected players and spectators.
+    
+    Args:
+        sender_username: The username of the message sender
+        message: The chat message text
+    """
+    chat_msg = f"[CHAT] {sender_username}: {message}"
+    print(f"[INFO] Broadcasting chat: {chat_msg}")
+    
+    # Get all active connections to send to
+    recipients = []
+    
+    # Add active players
+    with active_usernames_lock:
+        for username, conn in active_usernames.items():
+            recipients.append((username, conn))
+    
+    # Add spectators
+    with spectators_lock:
+        for conn in current_game_spectators:
+            # Spectators don't have usernames in this list, add with None
+            recipients.append((None, conn))
+    
+    # Send to all recipients
+    for username, conn in recipients:
+        try:
+            # Don't echo message back to sender
+            if username == sender_username:
+                continue
+                
+            send_packet(conn, PACKET_TYPE_CHAT, chat_msg)
+        except:
+            pass
+
 class ProtocolAdapter:
     def __init__(self, conn, username):
         self.conn = conn
@@ -107,11 +144,15 @@ class ProtocolAdapter:
         if packet_type == PACKET_TYPE_MOVE:
             return payload_str + "\n"
         elif packet_type == PACKET_TYPE_CHAT:
-            # Also support chat messages for selections like 'M' or 'R' for ship placement
+            # Process chat message
+            # If it's a game-relevant input like M/R for ship placement, handle as command
+            # Otherwise, broadcast as chat message
             if payload_str.upper() in ['M', 'R', 'H', 'V', 'Y', 'N', 'YES', 'NO']:
                 return payload_str + "\n"
             else:
-                return "\n"
+                # Broadcast chat message from this player
+                broadcast_chat_message(self.username, payload_str)
+                return "\n"  # Return empty line to not affect game flow
         elif packet_type == PACKET_TYPE_DISCONNECT:
             raise ConnectionResetError("Player disconnected")
         else:
@@ -147,18 +188,20 @@ def handle_player_disconnect(player_conn, player_name):
     Handle a player disconnection during gameplay.
     Marks the player as disconnected and starts the reconnection window.
     """
-    # Clean up active usernames
-    with active_usernames_lock:
-        if player_name in active_usernames:
-            del active_usernames[player_name]
-            print(f"[INFO] {player_name} removed from active usernames")
+    print(f"[DEBUG] Handling disconnection for player {player_name}")
     
-    # THEN add to disconnected players
+    # First add to disconnected players to preserve reconnection data
     with disconnected_players_lock:
         disconnected_players[player_name] = {
             'disconnect_time': time.time(),
         }
         print(f"[INFO] {player_name} marked as disconnected. Reconnection window: {RECONNECT_TIMEOUT} seconds")
+    
+    # Clean up active usernames
+    with active_usernames_lock:
+        if player_name in active_usernames:
+            del active_usernames[player_name]
+            print(f"[INFO] {player_name} removed from active usernames")
     
     try:
         send_packet(player_conn, PACKET_TYPE_ERROR, f"Connection lost. You have been disconnected from the game.")
@@ -205,7 +248,7 @@ def handle_waiting_player(conn, addr, username):
         # Send initial waiting message
         send_packet(conn, PACKET_TYPE_CHAT, f"\nYou are in the waiting lobby. Position: {position}")
         send_packet(conn, PACKET_TYPE_CHAT, "You will be matched with another player when the current game ends.")
-        send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to leave the waiting lobby.")
+        send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to leave the waiting lobby, or send messages to chat with others.")
         
         # Keep connection alive while waiting
         while True:
@@ -217,25 +260,29 @@ def handle_waiting_player(conn, addr, username):
                     payload_str = payload.decode() if isinstance(payload, bytes) else payload
                     magic, seq, packet_type, data_len = header
                     
-                    if packet_type == PACKET_TYPE_CHAT and payload_str.lower() == 'quit':
-                        print(f"[INFO] {username} has chosen to quit the waiting lobby.")
-                        with waiting_players_lock:
-                            # Remove player from queue if they're still in
-                            temp_queue = queue.Queue()
-                            while not waiting_players.empty():
-                                player = waiting_players.get()
-                                if player[0] != conn:  # Skip the quitting player
-                                    temp_queue.put(player)
-                            waiting_players = temp_queue
-                        send_packet(conn, PACKET_TYPE_CHAT, "You have left the waiting lobby.")
-                        
-                        # Remove from active usernames
-                        with active_usernames_lock:
-                            if username in active_usernames:
-                                del active_usernames[username]
-                                print(f"[INFO] Removed {username} from active usernames after quitting waiting lobby.")
-                                
-                        return
+                    if packet_type == PACKET_TYPE_CHAT:
+                        if payload_str.lower() == 'quit':
+                            print(f"[INFO] {username} has chosen to quit the waiting lobby.")
+                            with waiting_players_lock:
+                                # Remove player from queue if they're still in
+                                temp_queue = queue.Queue()
+                                while not waiting_players.empty():
+                                    player = waiting_players.get()
+                                    if player[0] != conn:  # Skip the quitting player
+                                        temp_queue.put(player)
+                                waiting_players = temp_queue
+                            send_packet(conn, PACKET_TYPE_CHAT, "You have left the waiting lobby.")
+                            
+                            # Remove from active usernames
+                            with active_usernames_lock:
+                                if username in active_usernames:
+                                    del active_usernames[username]
+                                    print(f"[INFO] Removed {username} from active usernames after quitting waiting lobby.")
+                                    
+                            return
+                        else:
+                            # Broadcast chat message from waiting player
+                            broadcast_chat_message(username, payload_str)
                     
                     elif packet_type == PACKET_TYPE_DISCONNECT:
                         # Handle player disconnect
@@ -334,30 +381,21 @@ def handle_waiting_player(conn, addr, username):
 def handle_spectator(conn, addr, game):
     """Handle a spectator connection."""
     print(f"[DEBUG] New spectator connection from {addr}")
+    spectator_username = f"Spectator@{addr[0]}:{addr[1]}"  # Create a name for the spectator
+    
     try:
         # Send welcome messages first
         if not send_packet(conn, PACKET_TYPE_CHAT, "\nWelcome! You are now spectating a Battleship game."):
             print("[DEBUG] Failed to send welcome message")
             return
             
-        if not send_packet(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate."):
+        if not send_packet(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate in the game."):
             print("[DEBUG] Failed to send welcome message")
             return
             
-        if not send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating."):
+        if not send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating. You can send chat messages that will be seen by all players and spectators."):
             print("[DEBUG] Failed to send welcome message")
             return
-        
-        # Send initial spectator packet with current game state
-        spectator_data = {
-            'board_size': game.board_size,
-            'player1': game.player1,
-            'player2': game.player2,
-            'current_turn': game.current_turn,
-            'game_state': game.game_state,
-            'last_move': game.last_move,
-            'last_move_result': game.last_move_result
-        }
         
         # Send current game state information
         game_state_message = f"\nCurrent Game Status:\n"
@@ -378,6 +416,9 @@ def handle_spectator(conn, addr, game):
         with spectators_lock:
             current_game_spectators.append(conn)
             print(f"[DEBUG] Added spectator to list. Total spectators: {len(current_game_spectators)}")
+
+        # Broadcast that a new spectator joined
+        broadcast_chat_message("SERVER", f"A new spectator has joined to watch the game")
 
         # Set a longer timeout for spectators
         conn.settimeout(30)  # 30 second timeout
@@ -423,7 +464,7 @@ def handle_spectator(conn, addr, game):
                     print("[DEBUG] Received invalid packet from spectator")
                     continue
                     
-                if header is None:
+                if header is None:  # No data received
                     continue
                     
                 magic, seq, ptype, dlen = header
@@ -448,18 +489,17 @@ def handle_spectator(conn, addr, game):
                             print("[DEBUG] Failed to send goodbye message")
                         break
                     else:
-                        # Echo back any other chat messages as feedback
-                        if not send_packet(conn, PACKET_TYPE_CHAT, f"Spectator message: {payload_str}"):
-                            print("[DEBUG] Failed to echo spectator message")
+                        # Broadcast the chat message to all players and spectators
+                        broadcast_chat_message(spectator_username, payload_str)
                 elif ptype == PACKET_TYPE_MOVE:
                     # Explain that spectators can't make moves
                     payload_str = payload.decode() if isinstance(payload, bytes) else payload
-                    if not send_packet(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave."):
+                    if not send_packet(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave or send chat messages."):
                         print("[DEBUG] Failed to send spectator restriction message")
                 else:
                     print(f"[DEBUG] Unexpected packet type from spectator: {get_packet_type_name(ptype)}")
                     # Send an informative message about valid commands
-                    if not send_packet(conn, PACKET_TYPE_CHAT, "As a spectator, you can only use 'quit' to leave."):
+                    if not send_packet(conn, PACKET_TYPE_CHAT, "As a spectator, you can use 'quit' to leave or send chat messages."):
                         print("[DEBUG] Failed to send help message")
                     continue
                     
@@ -479,6 +519,9 @@ def handle_spectator(conn, addr, game):
             if conn in current_game_spectators:
                 current_game_spectators.remove(conn)
                 print(f"[DEBUG] Removed spectator from list. Remaining spectators: {len(current_game_spectators)}")
+                
+        # Notify others that the spectator left
+        broadcast_chat_message("SERVER", f"A spectator has left the game")
         conn.close()
 
 def notify_spectators(message):
@@ -957,8 +1000,7 @@ def check_username_available(username):
     """
     print(f"[DEBUG] Checking username availability for '{username}'")
     
-    # First check if username is in disconnected players dictionary
-    disconnected_status = False
+    # Check if username is in disconnected players dictionary
     with disconnected_players_lock:
         if username in disconnected_players:
             print(f"[DEBUG] Found '{username}' in disconnected_players")
@@ -975,8 +1017,35 @@ def check_username_available(username):
     # Next check if username is already in active usernames
     with active_usernames_lock:
         if username in active_usernames:
-            print(f"[DEBUG] '{username}' is already in active_usernames")
-            return (False, "Username already in use by another player.")
+            # Check if the connection is still valid
+            try:
+                # Try to send a heartbeat to see if the connection is still alive
+                if not send_packet(active_usernames[username], PACKET_TYPE_HEARTBEAT, ""):
+                    print(f"[DEBUG] '{username}' has a dead connection in active_usernames, removing it")
+                    del active_usernames[username]
+                    # Add to disconnected players for a short reconnection window
+                    with disconnected_players_lock:
+                        if username not in disconnected_players:
+                            disconnected_players[username] = {
+                                'disconnect_time': time.time(),
+                            }
+                            print(f"[DEBUG] '{username}' marked as disconnected after connection check")
+                    return (False, "disconnected")
+                else:
+                    print(f"[DEBUG] '{username}' is already in active_usernames with an active connection")
+                    return (False, "Username already in use by another player.")
+            except:
+                # If there's an error communicating, the connection is likely dead
+                print(f"[DEBUG] Exception when checking '{username}' connection, removing from active_usernames")
+                del active_usernames[username]
+                # Add to disconnected players for a short reconnection window
+                with disconnected_players_lock:
+                    if username not in disconnected_players:
+                        disconnected_players[username] = {
+                            'disconnect_time': time.time(),
+                        }
+                        print(f"[DEBUG] '{username}' marked as disconnected after exception")
+                return (False, "disconnected")
         else:
             print(f"[DEBUG] '{username}' is not in active_usernames")
     
@@ -1010,17 +1079,26 @@ def handle_reconnection(conn, addr, username):
             
         # Reconnection is valid - remove from disconnected_players
         print(f"[INFO] {username} successfully reconnected to their game after {elapsed:.1f}s")
-        del disconnected_players[username]
         
         # Add to active usernames
         with active_usernames_lock:
             if username in active_usernames:
                 print(f"[WARNING] {username} was already in active_usernames during reconnection!")
+                # Close the old connection if it exists
+                try:
+                    old_conn = active_usernames[username]
+                    send_packet(old_conn, PACKET_TYPE_ERROR, "Another client has reconnected with your username.")
+                    old_conn.close()
+                except:
+                    pass
             active_usernames[username] = conn
             print(f"[DEBUG] Added {username} back to active_usernames")
             
         # Send welcome back message
         send_packet(conn, PACKET_TYPE_RECONNECT, "Successfully reconnected to your game.")
+        
+        # Remove from disconnected players after successful reconnection
+        del disconnected_players[username]
         
         return True
 
