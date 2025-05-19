@@ -55,6 +55,31 @@ player_connections_lock = threading.Lock()
 current_games = {}  # game_id -> {player1_username, player2_username, started_time}
 current_games_lock = threading.Lock()
 
+# Global game object for spectators
+from battleship import BOARD_SIZE
+class DummyGame:
+    def __init__(self):
+        self.board_size = BOARD_SIZE
+        self.player1 = "Waiting for players"
+        self.player2 = "Waiting for players"
+        self.current_turn = None
+        self.game_state = "waiting"
+        self.last_move = None
+        self.last_move_result = None
+
+class RealGame:
+    def __init__(self, player1, player2):
+        self.board_size = BOARD_SIZE
+        self.player1 = player1
+        self.player2 = player2
+        self.current_turn = player1
+        self.game_state = "setup"
+        self.last_move = None
+        self.last_move_result = None
+
+# Initialize with a dummy game
+current_game = DummyGame()
+
 class ProtocolAdapter:
     def __init__(self, conn, username):
         self.conn = conn
@@ -310,7 +335,20 @@ def handle_spectator(conn, addr, game):
     """Handle a spectator connection."""
     print(f"[DEBUG] New spectator connection from {addr}")
     try:
-        # Send initial spectator packet
+        # Send welcome messages first
+        if not send_packet(conn, PACKET_TYPE_CHAT, "\nWelcome! You are now spectating a Battleship game."):
+            print("[DEBUG] Failed to send welcome message")
+            return
+            
+        if not send_packet(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate."):
+            print("[DEBUG] Failed to send welcome message")
+            return
+            
+        if not send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating."):
+            print("[DEBUG] Failed to send welcome message")
+            return
+        
+        # Send initial spectator packet with current game state
         spectator_data = {
             'board_size': game.board_size,
             'player1': game.player1,
@@ -320,10 +358,26 @@ def handle_spectator(conn, addr, game):
             'last_move': game.last_move,
             'last_move_result': game.last_move_result
         }
-        print(f"[DEBUG] Sending initial spectator data: {spectator_data}")
-        if not send_packet(conn, PACKET_TYPE_BOARD_UPDATE, json.dumps(spectator_data).encode()):
-            print("[DEBUG] Failed to send initial spectator data")
+        
+        # Send current game state information
+        game_state_message = f"\nCurrent Game Status:\n"
+        game_state_message += f"Player 1: {game.player1}\n"
+        game_state_message += f"Player 2: {game.player2}\n"
+        game_state_message += f"Game State: {game.game_state}\n"
+        
+        if game.current_turn:
+            game_state_message += f"Current Turn: {game.current_turn}\n"
+        else:
+            game_state_message += "Waiting for game to start...\n"
+            
+        if not send_packet(conn, PACKET_TYPE_CHAT, game_state_message):
+            print("[DEBUG] Failed to send game state message")
             return
+
+        # Add spectator to the list
+        with spectators_lock:
+            current_game_spectators.append(conn)
+            print(f"[DEBUG] Added spectator to list. Total spectators: {len(current_game_spectators)}")
 
         # Set a longer timeout for spectators
         conn.settimeout(30)  # 30 second timeout
@@ -331,9 +385,15 @@ def handle_spectator(conn, addr, game):
         last_heartbeat = time.time()
         heartbeat_interval = 15  # Send heartbeat every 15 seconds
         
+        # Send a status update every few seconds
+        last_status_update = time.time()
+        status_update_interval = 10  # Update every 10 seconds
+        
         while True:
             try:
                 current_time = time.time()
+                
+                # Send heartbeat if needed
                 if current_time - last_heartbeat >= heartbeat_interval:
                     print("[DEBUG] Sending spectator heartbeat")
                     if not send_packet(conn, PACKET_TYPE_HEARTBEAT, b''):
@@ -341,13 +401,29 @@ def handle_spectator(conn, addr, game):
                         break
                     last_heartbeat = current_time
                 
+                # Send status update if needed
+                if current_time - last_status_update >= status_update_interval:
+                    status_message = f"\nGame Status Update:\n"
+                    status_message += f"Game State: {game.game_state}\n"
+                    if game.current_turn:
+                        status_message += f"Current Turn: {game.current_turn}\n"
+                    if game.last_move:
+                        status_message += f"Last Move: {game.last_move}\n"
+                    if game.last_move_result:
+                        status_message += f"Result: {game.last_move_result}\n"
+                        
+                    if not send_packet(conn, PACKET_TYPE_CHAT, status_message):
+                        print("[DEBUG] Failed to send status update")
+                        break
+                    last_status_update = current_time
+                
                 # Receive any data from spectator
                 is_valid, header, payload = receive_packet(conn, timeout=1.0)
-                if not is_valid:
+                if not is_valid and header is not None:
                     print("[DEBUG] Received invalid packet from spectator")
                     continue
                     
-                if header is None:  # No data received
+                if header is None:
                     continue
                     
                 magic, seq, ptype, dlen = header
@@ -361,10 +437,30 @@ def handle_spectator(conn, addr, game):
                         break
                 elif ptype == PACKET_TYPE_ACK:
                     print("[DEBUG] Received ACK from spectator")
-                    # Just acknowledge receipt
+                    # Acknowledge receipt
                     continue
+                elif ptype == PACKET_TYPE_CHAT:
+                    # Handle chat messages (e.g., 'quit')
+                    payload_str = payload.decode() if isinstance(payload, bytes) else payload
+                    if payload_str.lower() == 'quit':
+                        print(f"[DEBUG] Spectator {addr} requested to quit")
+                        if not send_packet(conn, PACKET_TYPE_CHAT, "You have left the spectator mode. Goodbye!"):
+                            print("[DEBUG] Failed to send goodbye message")
+                        break
+                    else:
+                        # Echo back any other chat messages as feedback
+                        if not send_packet(conn, PACKET_TYPE_CHAT, f"Spectator message: {payload_str}"):
+                            print("[DEBUG] Failed to echo spectator message")
+                elif ptype == PACKET_TYPE_MOVE:
+                    # Explain that spectators can't make moves
+                    payload_str = payload.decode() if isinstance(payload, bytes) else payload
+                    if not send_packet(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave."):
+                        print("[DEBUG] Failed to send spectator restriction message")
                 else:
                     print(f"[DEBUG] Unexpected packet type from spectator: {get_packet_type_name(ptype)}")
+                    # Send an informative message about valid commands
+                    if not send_packet(conn, PACKET_TYPE_CHAT, "As a spectator, you can only use 'quit' to leave."):
+                        print("[DEBUG] Failed to send help message")
                     continue
                     
             except socket.timeout:
@@ -378,6 +474,11 @@ def handle_spectator(conn, addr, game):
         print(f"[DEBUG] Fatal error in spectator handler: {e}")
     finally:
         print(f"[DEBUG] Closing spectator connection from {addr}")
+        # Remove from spectators list
+        with spectators_lock:
+            if conn in current_game_spectators:
+                current_game_spectators.remove(conn)
+                print(f"[DEBUG] Removed spectator from list. Remaining spectators: {len(current_game_spectators)}")
         conn.close()
 
 def notify_spectators(message):
@@ -385,7 +486,7 @@ def notify_spectators(message):
     Send a message to all spectators.
     """
     with spectators_lock:
-        for conn in current_game_spectators[:]:  # Copy list to avoid modification during iteration
+        for conn in current_game_spectators[:]: 
             try:
                 send_packet(conn, PACKET_TYPE_BOARD_UPDATE, message)
             except:
@@ -398,7 +499,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
     Manages multiple games in succession if players choose to play again.
     When this function returns, the connections will be closed.
     """
-    global game_in_progress, current_game_spectators, disconnected_players
+    global game_in_progress, current_game_spectators, disconnected_players, current_game
     
     # Set socket timeouts for gameplay
     player1_conn.settimeout(CONNECTION_TIMEOUT)
@@ -422,16 +523,42 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
             print("[INFO] Starting a new game between players...")
             notify_spectators("A new game is starting!")
             
+            # Update the current game object for spectators
+            current_game.game_state = "starting"
+            current_game.last_move = None
+            current_game.last_move_result = None
+            
             # Send game start notification
             send_packet(player1_conn, PACKET_TYPE_GAME_START, f"Starting game against {player2_username}")
             send_packet(player2_conn, PACKET_TYPE_GAME_START, f"Starting game against {player1_username}")
             
             try:
                 # Create new board objects for this game 
+                player1_board = Board(BOARD_SIZE)
+                player2_board = Board(BOARD_SIZE)
+                
+                # Update the current game object for spectators
+                current_game.game_state = "setup"
+                
+                # Create a callback to update game state for spectators
+                def update_game_state_for_spectators(move, result):
+                    current_game.last_move = move
+                    current_game.last_move_result = result
+                    current_game.game_state = "in_progress"
+                    # Notify spectators with the update
+                    notify_spectators(f"Move: {move}, Result: {result}")
                 
                 # Run the game - create the board objects internally
-                run_two_player_game(player1_adapter, player1_adapter, player2_adapter, player2_adapter, notify_spectators_callback=notify_spectators)
+                run_two_player_game(player1_adapter, player1_adapter, player2_adapter, player2_adapter, 
+                                   notify_spectators_callback=notify_spectators)
+                                   
+                # Set game state to completed                   
+                current_game.game_state = "completed"
+                
             except ConnectionResetError:
+                # Update game state
+                current_game.game_state = "interrupted"
+                
                 # Handle disconnection during gameplay
                 if player1_conn.fileno() == -1:  # Player 1 disconnected
                     # Store player1's board and game state for potential reconnection
@@ -470,6 +597,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                             send_packet(player2_conn, PACKET_TYPE_CHAT, f"{player1_username} has reconnected. Game continues.")
                             notify_spectators(f"{player1_username} has reconnected. Game continues.")
                             
+                            # Update game state 
+                            current_game.game_state = "in_progress"
+                            
                             # Reset player's board from stored state
                             with disconnected_players_lock:
                                 if player1_username in disconnected_players:
@@ -484,6 +614,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                         reconnected = player1_username in active_usernames
                         
                     if not reconnected:
+                        current_game.game_state = "completed"
+                        current_game.last_move_result = f"{player2_username} wins by default"
+                        
                         try:
                             send_packet(player2_conn, PACKET_TYPE_CHAT, f"\n{player1_username} did not reconnect within the time limit. You win by default!")
                         except:
@@ -542,6 +675,9 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                         reconnected = player2_username in active_usernames
                         
                     if not reconnected:
+                        current_game.game_state = "completed"
+                        current_game.last_move_result = f"{player1_username} wins by default"
+                        
                         try:
                             send_packet(player1_conn, PACKET_TYPE_CHAT, f"\n{player2_username} did not reconnect within the time limit. You win by default!")
                         except:
@@ -685,7 +821,7 @@ def run_game_server():
     """
     Main server loop that handles connections and starts games.
     """
-    global waiting_players, waiting_players_lock, game_in_progress
+    global waiting_players, waiting_players_lock, game_in_progress, current_game
     
     print(f"[INFO] Server listening on {HOST}:{PORT}")
     
@@ -766,7 +902,7 @@ def run_game_server():
                         # Game in progress, add as spectator
                         print(f"[INFO] Game in progress. {username}@{addr} will be a spectator.")
                         threading.Thread(target=handle_spectator,
-                                      args=(conn, addr, game), 
+                                      args=(conn, addr, current_game), 
                                       daemon=True).start()
                     else:
                         # No game in progress, check waiting queue
@@ -778,6 +914,10 @@ def run_game_server():
                                 print(f"[INFO] Found waiting player: {player1_username}@{player1_addr}. Starting game with {username}@{addr}.")
                                 # Start game with these two players
                                 game_in_progress = True
+                                
+                                # Update the global current_game object
+                                current_game = RealGame(player1_username, username)
+                                
                                 threading.Thread(target=handle_game_session, 
                                               args=(player1_conn, conn, player1_addr, addr, player1_username, username),
                                               daemon=True).start()

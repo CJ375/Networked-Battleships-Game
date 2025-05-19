@@ -70,6 +70,10 @@ def receive_messages(sock):
     Continuously receive and display messages from the server using the protocol
     """
     global running
+    
+    # Track if this is a spectator to handle special messages appropriately
+    is_spectator = False
+    spectator_mode_detected = False
 
     while running:
         try:
@@ -89,9 +93,16 @@ def receive_messages(sock):
             magic, seq, packet_type, data_len = header
             payload_str = payload.decode() if isinstance(payload, bytes) else payload
             
+            # Check for messages that indicate spectator mode
+            if not spectator_mode_detected and packet_type == PACKET_TYPE_CHAT:
+                if "spectating" in payload_str.lower() or "spectator" in payload_str.lower():
+                    is_spectator = True
+                    spectator_mode_detected = True
+                    print("\n[INFO] You are in spectator mode. You can observe the game but cannot participate.")
+                    print("[INFO] Type 'quit' to leave spectator mode.")
+            
             # Process different packet types
             if packet_type == PACKET_TYPE_BOARD_UPDATE:
-                # Board updates will be sent as a formatted string payload
                 print("\n" + payload_str)
             elif packet_type == PACKET_TYPE_GAME_START:
                 print(f"\n[GAME START] {payload_str}")
@@ -105,9 +116,13 @@ def receive_messages(sock):
                 print(f"\n[RECONNECTED] {payload_str}")
             elif packet_type == PACKET_TYPE_HEARTBEAT:
                 # Respond to heartbeat with ACK to maintain connection
-                send_packet(sock, PACKET_TYPE_ACK, str(seq))
-            else:
+                print("[DEBUG] Received heartbeat, sending ACK")
+                send_packet(sock, PACKET_TYPE_ACK, b'')
+            elif packet_type == PACKET_TYPE_CHAT:
                 # Regular message (chat, etc.)
+                print(payload_str)
+            else:
+                print(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
                 print(payload_str)
                 
         except ConnectionResetError:
@@ -187,6 +202,14 @@ def main():
             receive_thread.start()
 
             try:
+                # Display helpful information about expected client state
+                print("\n[INFO] Waiting for server response...")
+                print("[INFO] You may be placed as a player or spectator depending on server status.")
+                print("[INFO] Type 'quit' at any time to exit.")
+                
+                # Small delay to let initial messages come in
+                time.sleep(1)
+
                 # Main thread handles user input
                 while running:
                     try:
@@ -205,8 +228,15 @@ def main():
                         
                         # Send user input to server using the protocol
                         # Determine packet type based on input
-                        if user_input.lower().startswith("fire ") or user_input.upper() in ["H", "V"] or any(c.isalpha() and c.upper() in "ABCDEFGHIJ" for c in user_input):
-                            # This is likely a game move (fire command or ship placement)
+                        if len(user_input) == 0:
+                            # Skip empty input
+                            continue
+                        elif user_input.lower().startswith("fire ") or (len(user_input) <= 3 and any(c.isalpha() and c.upper() in "ABCDEFGHIJ" for c in user_input)):
+                            # This is a game move (fire command or coordinate)
+                            if not send_packet(s, PACKET_TYPE_MOVE, user_input):
+                                print("[ERROR] Failed to send move to server")
+                        elif user_input.upper() in ["H", "V", "M", "R", "Y", "N", "YES", "NO"]:
+                            # Ship placement or yes/no response
                             if not send_packet(s, PACKET_TYPE_MOVE, user_input):
                                 print("[ERROR] Failed to send move to server")
                         else:
