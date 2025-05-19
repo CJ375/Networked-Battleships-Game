@@ -141,7 +141,10 @@ class BattleshipGUI(tk.Tk):
         self.network_thread = None
         self.username = ""
         self.is_spectator = False
-        self.running = True 
+        self.running = True
+
+        self.spectator_player1_username = None
+        self.spectator_player2_username = None
 
         # Board and cell dimensions
         self.board_size = 10
@@ -192,7 +195,8 @@ class BattleshipGUI(tk.Tk):
         # Opponent Board UI
         self.opponent_board_frame = tk.Frame(self.boards_frame, relief=tk.SUNKEN, borderwidth=1)
         self.opponent_board_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        tk.Label(self.opponent_board_frame, text="Opponent's Board").pack()
+        self.opponent_board_name_label = tk.Label(self.opponent_board_frame, text="Opponent's Board")
+        self.opponent_board_name_label.pack()
         self.opponent_board_canvas = tk.Canvas(self.opponent_board_frame, 
                                                width=self.cell_size * (self.board_size + 1), 
                                                height=self.cell_size * (self.board_size + 1), 
@@ -485,7 +489,7 @@ class BattleshipGUI(tk.Tk):
                 self.server_message_queue.put(("packet", packet_type, payload_str))
 
                 if not spectator_mode_detected_local and packet_type == PACKET_TYPE_CHAT:
-                    if "spectating" in payload_str.lower() or "spectator" in payload_str.lower():
+                    if payload_str.strip().startswith("Welcome! You are now spectating a Battleship game."):
                         self.server_message_queue.put(("spectator_mode_on", None))
                         spectator_mode_detected_local = True
                         
@@ -543,9 +547,16 @@ class BattleshipGUI(tk.Tk):
                     return 
                 elif msg_type == "spectator_mode_on":
                     self.is_spectator = True
-                    is_spectator = True 
+                    is_spectator = True
                     self.log_message("\n[INFO] You are in spectator mode. Observe the game; no moves allowed.")
                     self.title(f"Battleship Client - {self.username} (Spectator)")
+                    # Set initial labels for spectator boards
+                    self.player_board_label.config(text="Player 1's Board (Spectator)")
+                    if hasattr(self, 'opponent_board_name_label'): # Ensure it exists
+                        self.opponent_board_name_label.config(text="Player 2's Board (Spectator)")
+                    # Clear boards
+                    self.draw_board_on_canvas(self.player_board_canvas, [])
+                    self.draw_board_on_canvas(self.opponent_board_canvas, [])
             except Exception as e:
                 self.log_message(f"[ERROR] Error processing GUI queue: {e}")
 
@@ -595,9 +606,9 @@ class BattleshipGUI(tk.Tk):
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
             elif "Place your" in payload_str and "cells)." in payload_str and self.username in payload_str:
-                # Example: "Player <username>, place your Carrier (5 cells)."
+                # E.g.,: "Player <username>, place your Carrier (5 cells)."
                 self._start_manual_ship_placement(payload_str)
-            elif "All ships have been placed" in payload_str: # Player's or opponent's
+            elif "All ships have been placed" in payload_str:
                 self.log_message(payload_str)
                 if self.is_placing_ships:
                     self._toggle_ship_placement_ui(show=False)
@@ -609,22 +620,50 @@ class BattleshipGUI(tk.Tk):
                  self.log_message(f"[SERVER] {payload_str}")
                  self.selected_coord_label.config(text="Selected Start: Overlap!")
 
-            # Regular chat message handling
-            elif "Spectator@" in payload_str and payload_str.startswith("[CHAT]"):
-                try:
-                    parts = payload_str.split(":", 2) 
-                    sender_info_part = parts[0].replace("[CHAT]", "").strip() 
-                    message_part = parts[1].strip() if len(parts) == 2 else (parts[2].strip() if len(parts) > 2 else "")
-                    if "Spectator@" in sender_info_part:
-                        spectator_name = sender_info_part.split("@")[0].strip() 
-                        formatted_message = f"{spectator_name} (spectator): {message_part}"
-                        self.log_message(f"\n{formatted_message}")
-                    else: 
-                        self.log_message(f"\n{payload_str}") 
-                except IndexError:
-                     self.log_message(f"\n{payload_str}") 
-            else:
-                self.log_message(payload_str) # Display as is
+            is_spectator_status_msg = False
+            if self.is_spectator and "Player 1:" in payload_str and "Player 2:" in payload_str and "Game State:" in payload_str:
+                lines_for_names = payload_str.split('\n')
+                parsed_p1 = False
+                parsed_p2 = False
+                for chat_line in lines_for_names:
+                    clean_line = chat_line.strip()
+                    if clean_line.startswith("Player 1:"):
+                        try:
+                            name = clean_line.split(":", 1)[1].strip()
+                            if name and name != "Waiting for players":
+                                self.spectator_player1_username = name
+                                parsed_p1 = True
+                        except IndexError:
+                            pass
+                    elif clean_line.startswith("Player 2:"):
+                        try:
+                            name = clean_line.split(":", 1)[1].strip()
+                            if name and name != "Waiting for players":
+                                self.spectator_player2_username = name
+                                parsed_p2 = True
+                        except IndexError:
+                            pass
+                if parsed_p1 or parsed_p2:
+                    self.log_message(f"[DEBUG] Spectator names updated: P1='{self.spectator_player1_username}', P2='{self.spectator_player2_username}'")
+                self.log_message(payload_str)
+                is_spectator_status_msg = True
+
+            if not is_spectator_status_msg:
+                if "Spectator@" in payload_str and payload_str.startswith("[CHAT]"):
+                    try:
+                        parts = payload_str.split(":", 2)
+                        sender_info_part = parts[0].replace("[CHAT]", "").strip()
+                        message_part = parts[1].strip() if len(parts) == 2 else (parts[2].strip() if len(parts) > 2 else "")
+                        if "Spectator@" in sender_info_part:
+                            spectator_name = sender_info_part.split("@")[0].strip()
+                            formatted_message = f"{spectator_name} (spectator): {message_part}"
+                            self.log_message(f"\n{formatted_message}")
+                        else:
+                            self.log_message(f"\n{payload_str}")
+                    except IndexError:
+                         self.log_message(f"\n{payload_str}")
+                else:
+                    self.log_message(payload_str)
         else:
             self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
             self.log_message(payload_str)
@@ -632,59 +671,128 @@ class BattleshipGUI(tk.Tk):
         self.chat_display.see(tk.END) 
 
     def update_boards_from_string(self, board_string):
-        self.log_message("[GUI Board Update Triggered]") 
-        
+        self.log_message("[GUI Board Update Triggered]")
         lines = board_string.strip().split('\n')
-        
-        player_grid_data = []
-        opponent_grid_data = []
-        current_parsing_grid = None 
 
-        for line in lines:
-            line_strip = line.strip()
-            if not line_strip: 
-                current_parsing_grid = None 
-                continue
+        if self.is_spectator:
+            player1_grid_data = []
+            player2_grid_data = []
+            current_parsing_target_spectator = None
 
-            if "Your Grid:" in line_strip or ("SPECTATOR_GRID" in line_strip and self.is_spectator):
-                current_parsing_grid = "player" 
-                if "SPECTATOR_GRID" in line_strip:
-                    self.player_board_label.config(text="Game View (Spectator)")
+            # Update labels based on stored spectator usernames
+            if self.spectator_player1_username:
+                self.player_board_label.config(text=f"{self.spectator_player1_username}'s Board")
+            else:
+                self.player_board_label.config(text="Player 1's Board (Spectator)")
+
+            if hasattr(self, 'opponent_board_name_label'):
+                if self.spectator_player2_username:
+                    self.opponent_board_name_label.config(text=f"{self.spectator_player2_username}'s Board")
                 else:
-                    self.player_board_label.config(text=f"Your Board ({self.username})")
-                continue
-            elif "Opponent's Grid:" in line_strip and not self.is_spectator:
-                current_parsing_grid = "opponent"
-                continue
-            
-            if line_strip and (line_strip[0].isspace() or line_strip.startswith("SPECTATOR_GRID")):
-                 if line_strip.strip().replace(" ","").replace("SPECTATOR_GRID","").isdigit():
+                    self.opponent_board_name_label.config(text="Player 2's Board (Spectator)")
+
+            # Define expected headers based on known usernames
+            expected_p1_header = f"{self.spectator_player1_username}'s Grid:" if self.spectator_player1_username else None
+            expected_p2_header = f"{self.spectator_player2_username}'s Grid:" if self.spectator_player2_username else None
+
+            generic_p1_header_text = "Player 1's Grid:"
+            generic_p2_header_text = "Player 2's Grid:"
+
+
+            for line in lines:
+                line_strip = line.strip()
+                if not line_strip:
                     continue
-                 if line_strip.startswith("SPECTATOR_GRID") and current_parsing_grid == "player":
-                     pass
-                 elif line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
-                     continue
 
+                is_p1_header_match = (expected_p1_header and line_strip == expected_p1_header) or \
+                                     (not expected_p1_header and line_strip == generic_p1_header_text)
+                is_p2_header_match = (expected_p2_header and line_strip == expected_p2_header) or \
+                                     (not expected_p2_header and line_strip == generic_p2_header_text)
 
-            if current_parsing_grid and line_strip and line_strip[0].isalpha():
-                cells = [c for c in line_strip.split(' ') if c] 
-                if cells: 
-                    row_char = cells.pop(0) 
-                    if len(cells) == self.board_size: # Ensure correct number of cells
-                        if current_parsing_grid == "player":
-                            player_grid_data.append(cells)
-                        elif current_parsing_grid == "opponent":
-                            opponent_grid_data.append(cells)
-                    else:
-                        self.log_message(f"[DEBUG] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'")
+                if is_p1_header_match:
+                    current_parsing_target_spectator = "P1"
+                    player1_grid_data = []
+                    if self.spectator_player1_username:
+                         self.player_board_label.config(text=f"{self.spectator_player1_username}'s Board")
+                    elif line_strip == generic_p1_header_text:
+                         self.player_board_label.config(text="Player 1's Board (Spectator)")
+                    continue
+                elif is_p2_header_match:
+                    current_parsing_target_spectator = "P2"
+                    player2_grid_data = []
+                    if hasattr(self, 'opponent_board_name_label'):
+                        if self.spectator_player2_username:
+                            self.opponent_board_name_label.config(text=f"{self.spectator_player2_username}'s Board")
+                        elif line_strip == generic_p2_header_text:
+                            self.opponent_board_name_label.config(text="Player 2's Board (Spectator)")
+                    continue
 
-        
-        if player_grid_data:
-            self.log_message(f"[DEBUG] Drawing player grid with data: {player_grid_data}")
-            self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
-        if opponent_grid_data:
-            self.log_message(f"[DEBUG] Drawing opponent grid with data: {opponent_grid_data}")
-            self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
+                if current_parsing_target_spectator:
+                    if len(line_strip) > 1 and line_strip[0].isalpha() and line_strip[1] == ' ':
+                        cells = [c for c in line_strip.split(' ') if c]
+                        if cells:
+                            row_char = cells.pop(0)
+                            if 'A' <= row_char <= 'J' and len(row_char) == 1:
+                                if len(cells) == self.board_size:
+                                    if current_parsing_target_spectator == "P1":
+                                        player1_grid_data.append(cells)
+                                    elif current_parsing_target_spectator == "P2":
+                                        player2_grid_data.append(cells)
+                                else:
+                                    self.log_message(f"[DEBUG SPECTATOR] Mismatched cell count for row {row_char}. Got {len(cells)}, expected {self.board_size}. Line: '{line_strip}'")
+            
+            if player1_grid_data or current_parsing_target_spectator == "P1":
+                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 1 grid ({len(player1_grid_data)} rows)")
+                self.draw_board_on_canvas(self.player_board_canvas, player1_grid_data)
+            if player2_grid_data or current_parsing_target_spectator == "P2":
+                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 2 grid ({len(player2_grid_data)} rows)")
+                self.draw_board_on_canvas(self.opponent_board_canvas, player2_grid_data)
+
+        else:
+            player_grid_data = []
+            opponent_grid_data = []
+            current_parsing_grid = None
+
+            for line in lines:
+                line_strip = line.strip()
+                if not line_strip:
+                    current_parsing_grid = None
+                    continue
+
+                if "Your Grid:" in line_strip:
+                    current_parsing_grid = "player"
+                    self.player_board_label.config(text=f"Your Board ({self.username})")
+                    continue
+                elif "Opponent's Grid:" in line_strip:
+                    current_parsing_grid = "opponent"
+                    if hasattr(self, 'opponent_board_name_label'):
+                        self.opponent_board_name_label.config(text="Opponent's Board")
+                    continue
+                
+                # Skip column number lines (e.g., "  1 2 3 ...")
+                if line_strip and line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
+                    if all(item.isdigit() for item in line_strip.split()):
+                        continue
+                
+                # Parse grid data lines
+                if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip : # Looks like "A . . ."
+                    cells = [c for c in line_strip.split(' ') if c]
+                    if cells:
+                        row_char = cells.pop(0)
+                        if len(cells) == self.board_size:
+                            if current_parsing_grid == "player":
+                                player_grid_data.append(cells)
+                            elif current_parsing_grid == "opponent":
+                                opponent_grid_data.append(cells)
+                        else:
+                            self.log_message(f"[DEBUG PLAYER] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'")
+            
+            if player_grid_data:
+                self.log_message(f"[DEBUG PLAYER] Drawing player grid with data: {player_grid_data}")
+                self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
+            if opponent_grid_data:
+                self.log_message(f"[DEBUG PLAYER] Drawing opponent grid with data: {opponent_grid_data}")
+                self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
 
 
     def draw_board_on_canvas(self, canvas, grid_data):
