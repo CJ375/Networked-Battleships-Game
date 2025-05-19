@@ -69,7 +69,7 @@ def mark_connection_active(username):
             with open(connection_file, 'w') as f:
                 json.dump({'username': username, 'timestamp': time.time(), 'disconnected': False}, f)
         else:
-            # File exists, read, update, and write
+            # File exists - rwx
             with open(connection_file, 'r+') as f:
                 try:
                     data = json.load(f)
@@ -86,7 +86,7 @@ def mark_connection_active(username):
         pass
 
 
-def load_connection_info(username): # This will be used by the GUI to check
+def load_connection_info(username):
     if not username:
         return False
     connection_file = get_connection_file(username)
@@ -95,19 +95,18 @@ def load_connection_info(username): # This will be used by the GUI to check
             with open(connection_file, 'r') as f:
                 data = json.load(f)
                 elapsed = time.time() - data.get('timestamp', 0)
-                if elapsed <= 60 and data.get('disconnected', False): # Only care if marked disconnected
-                    return True # Let the GUI present this
+                if elapsed <= 60 and data.get('disconnected', False):
+                    return True
                 elif elapsed > 60:
                     try:
-                        os.remove(connection_file) # Clean up old files
+                        os.remove(connection_file)
                     except:
                         pass
     except Exception as e:
-        # print(f"[DEBUG] Error loading connection info: {e}")
         pass
     return False
 
-def check_any_recent_connections(): # GUI will use this to present options
+def check_any_recent_connections():
     recent_usernames = []
     try:
         for filename in os.listdir(battleship_dir):
@@ -125,7 +124,6 @@ def check_any_recent_connections(): # GUI will use this to present options
                 except:
                     continue
     except Exception as e:
-        # print(f"[DEBUG] Error checking recent connections: {e}")
         pass
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
@@ -159,8 +157,8 @@ class BattleshipGUI(tk.Tk):
         self.current_ship_to_place_idx = 0
         self.current_ship_name = ""
         self.current_ship_length = 0
-        self.selected_placement_coord = None # e.g. "A1"
-        self.placement_orientation_var = tk.StringVar(value="H") # Default to Horizontal
+        self.selected_placement_coord = None # e.g., "A1"
+        self.placement_orientation_var = tk.StringVar(value="H") # Default to horizontal
 
         self._setup_ui()
         self._prompt_for_username_and_connect()
@@ -339,11 +337,11 @@ class BattleshipGUI(tk.Tk):
         self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?")
         self._toggle_ship_placement_ui(show=True, show_mr_choice=True)
 
-    def _send_placement_choice(self, choice): # "M" or "R"
+    def _send_placement_choice(self, choice):
         if self.sock:
             send_packet(self.sock, PACKET_TYPE_MOVE, choice)
             self.log_message(f"[ACTION] Sent placement choice: {choice}")
-            self._toggle_ship_placement_ui(show=False) # Hide M/R choice UI
+            self._toggle_ship_placement_ui(show=False)
             if choice.upper() == "M":
                  self.log_message("[INFO] Waiting for server to send ship details for manual placement...")
 
@@ -599,6 +597,7 @@ class BattleshipGUI(tk.Tk):
             self.log_message("[DEBUG] Received heartbeat, sending ACK")
             if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')
         elif packet_type == PACKET_TYPE_CHAT:
+            preliminary_result_shown = False
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
                 self.log_message(payload_str)
@@ -630,14 +629,14 @@ class BattleshipGUI(tk.Tk):
                 if stripped_payload.startswith("Hit") or \
                    stripped_payload.startswith("You hit") or \
                    ("sank" in stripped_payload.lower() and "you" in stripped_payload.lower()):
-                    self._optimistically_update_opponent_cell(self.last_fired_coord, 'X')
+                    self._apply_preliminary_shot_result(self.last_fired_coord, 'X')
                     shot_resolved = True
-                    optimistic_update_performed = True
+                    preliminary_result_shown = True
                 elif stripped_payload.startswith("Miss") or \
                      stripped_payload.startswith("You missed"):
-                    self._optimistically_update_opponent_cell(self.last_fired_coord, 'o')
+                    self._apply_preliminary_shot_result(self.last_fired_coord, 'o')
                     shot_resolved = True
-                    optimistic_update_performed = True
+                    preliminary_result_shown = True
                 elif "already fired" in stripped_payload.lower() or \
                      "invalid coordinate" in stripped_payload.lower() or \
                      "not your turn" in stripped_payload.lower():
@@ -675,7 +674,7 @@ class BattleshipGUI(tk.Tk):
                 self.log_message(payload_str)
                 is_spectator_status_msg = True
             
-            if not optimistic_update_performed and not is_spectator_status_msg:
+            if not preliminary_result_shown and not is_spectator_status_msg:
                 is_placement_prompt = ("Would you like to place ships manually" in payload_str or
                                      ("Place your" in payload_str and "cells)." in payload_str) or
                                      "All ships have been placed" in payload_str or
@@ -983,27 +982,27 @@ class BattleshipGUI(tk.Tk):
         if self.winfo_exists(): # Check if window still exists before destroying
             self.destroy()
 
-    def _optimistically_update_opponent_cell(self, coord_str, cell_char):
+    def _apply_preliminary_shot_result(self, coord_str, cell_char):
         if not coord_str: return
-        self.log_message(f"[OPTIMISTIC] Trying to update {coord_str} to {cell_char} on opponent board.")
+        self.log_message(f"[PRELIMINARY_UI] Trying to update {coord_str} to {cell_char} on opponent board.")
         try:
             row_char_upper = coord_str[0].upper()
             if not ('A' <= row_char_upper <= 'J'):
-                self.log_message(f"[OPTIMISTIC FAIL] Invalid row char: {coord_str[0]}")
+                self.log_message(f"[PRELIMINARY_UI FAIL] Invalid row char: {coord_str[0]}")
                 return
 
             row = ord(row_char_upper) - ord('A')
             col_str = coord_str[1:]
             if not col_str.isdigit():
-                self.log_message(f"[OPTIMISTIC FAIL] Invalid col string: {col_str}")
+                self.log_message(f"[PRELIMINARY_UI FAIL] Invalid col string: {col_str}")
                 return
             col = int(col_str) - 1
 
             if not (0 <= row < self.board_size and 0 <= col < self.board_size):
-                self.log_message(f"[OPTIMISTIC FAIL] Coord out of bounds: r{row} c{col}")
+                self.log_message(f"[PRELIMINARY_UI FAIL] Coord out of bounds: r{row} c{col}")
                 return
         except Exception as e:
-            self.log_message(f"[OPTIMISTIC FAIL] Error parsing coord '{coord_str}': {e}")
+            self.log_message(f"[PRELIMINARY_UI FAIL] Error parsing coord '{coord_str}': {e}")
             return
 
         canvas = self.opponent_board_canvas
@@ -1034,12 +1033,12 @@ class BattleshipGUI(tk.Tk):
             canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
                                 x1_rect - hit_x_padding, y0_rect + hit_x_padding,
                                 fill='#DC143C', width=3, tags="cells")
-            self.log_message(f"[OPTIMISTIC DRAW] Drew 'X' at {coord_str} (r{row},c{col})")
+            self.log_message(f"[PRELIMINARY_UI DRAW] Drew 'X' at {coord_str} (r{row},c{col})")
         elif cell_char == 'o':
             canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
                                 center_x + miss_dot_radius, center_y + miss_dot_radius,
                                 fill='white', outline='white', tags="cells")
-            self.log_message(f"[OPTIMISTIC DRAW] Drew 'o' at {coord_str} (r{row},c{col})")
+            self.log_message(f"[PRELIMINARY_UI DRAW] Drew 'o' at {coord_str} (r{row},c{col})")
 
 
 # Dialog for Reconnection

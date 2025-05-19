@@ -247,9 +247,7 @@ class Board:
 
 def parse_coordinate(coord_str):
     """
-    Convert something like 'B5' into zero-based (row, col).
-    Example: 'A1' => (0, 0), 'C10' => (2, 9)
-    HINT: you might want to add additional input validation here...
+    Convert e.g., 'B5' into zero-based (row, col).
     """
     coord_str = coord_str.strip().upper()
     print(BOARD_SIZE)
