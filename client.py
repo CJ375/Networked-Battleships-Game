@@ -17,6 +17,10 @@ import threading
 import time
 import os
 import json
+import tkinter as tk
+from tkinter import scrolledtext, simpledialog, messagebox, PhotoImage
+from queue import Queue
+import re
 from protocol import (
     receive_packet, send_packet, 
     PACKET_TYPE_USERNAME, PACKET_TYPE_MOVE, PACKET_TYPE_CHAT,
@@ -27,36 +31,23 @@ from protocol import (
 
 HOST = '127.0.0.1'
 PORT = 5001
+GUI_UPDATE_INTERVAL = 100
 
-# Flag (global) indicating if the client should stop running
-running = True
-
-# Store username for reconnection purposes
 current_username = ""
-
-# Flag indicating if the user is in spectator mode
 is_spectator = False
 
-# Define the storage directory for connection files within the project folder
-# This uses the current working directory, assuming the script is run from the project root.
 project_root = os.getcwd() 
 battleship_dir = os.path.join(project_root, ".reconnection_data")
-os.makedirs(battleship_dir, exist_ok=True) # Ensure the directory exists
+os.makedirs(battleship_dir, exist_ok=True)
 
-# Create a unique connection file per username to allow multiple players on the same machine
 def get_connection_file(username):
-    """Get the connection file path for a specific username"""
     if not username:
         return None
-    # Store connection info in a unique file per username within this directory
-    # This allows multiple players on the same machine to reconnect without conflicts
     return os.path.join(battleship_dir, f".battleship_connection_{username}.json")
 
 def save_connection_info(username):
-    """Save username to a file for reconnection"""
     if not username:
         return
-        
     connection_file = get_connection_file(username)
     try:
         with open(connection_file, 'w') as f:
@@ -65,68 +56,60 @@ def save_connection_info(username):
                 'timestamp': time.time(),
                 'disconnected': True 
             }, f)
-            print(f"[DEBUG] Saved connection info for '{username}' to {connection_file}")
     except Exception as e:
         print(f"[WARNING] Could not save connection information: {e}")
+        pass
 
 def mark_connection_active(username):
-    """Mark a connection as active (not disconnected)"""
     if not username:
         return
-        
     connection_file = get_connection_file(username)
     try:
-        # Only update if file exists
-        if os.path.exists(connection_file):
+        if not os.path.exists(connection_file):
+            with open(connection_file, 'w') as f:
+                json.dump({'username': username, 'timestamp': time.time(), 'disconnected': False}, f)
+        else:
+            # File exists, read, update, and write
             with open(connection_file, 'r+') as f:
                 try:
                     data = json.load(f)
                     data['disconnected'] = False
                     data['timestamp'] = time.time()
-                    
-                    # Reset file pointer and write updated data
                     f.seek(0)
                     json.dump(data, f)
                     f.truncate()
-                except:
-                    pass
+                except json.JSONDecodeError:
+                    f.seek(0)
+                    json.dump({'username': username, 'timestamp': time.time(), 'disconnected': False}, f)
+                    f.truncate()
     except Exception as e:
-        print(f"[DEBUG] Error marking connection active: {e}")
+        pass
 
-def load_connection_info(username):
-    """Load previous username connection if available and not expired"""
+
+def load_connection_info(username): # This will be used by the GUI to check
     if not username:
         return False
-        
     connection_file = get_connection_file(username)
     try:
         if os.path.exists(connection_file):
             with open(connection_file, 'r') as f:
                 data = json.load(f)
-                
-                # Check if reconnection window is still valid (60 seconds)
                 elapsed = time.time() - data.get('timestamp', 0)
-                if elapsed <= 60:
-                    print(f"[DEBUG] Found recent connection file for '{username}' ({elapsed:.1f}s old)")
-                    return True
-                else:
-                    # Connection is too old for reconnection
-                    print(f"[DEBUG] Connection file found but expired ({elapsed:.1f}s > 60s)")
+                if elapsed <= 60 and data.get('disconnected', False): # Only care if marked disconnected
+                    return True # Let the GUI present this
+                elif elapsed > 60:
                     try:
-                        os.remove(connection_file)
+                        os.remove(connection_file) # Clean up old files
                     except:
                         pass
     except Exception as e:
-        print(f"[DEBUG] Error loading connection info: {e}")
-    
+        # print(f"[DEBUG] Error loading connection info: {e}")
+        pass
     return False
 
-def check_any_recent_connections():
-    """Check if there are any recent connection files and return a list of usernames"""
+def check_any_recent_connections(): # GUI will use this to present options
     recent_usernames = []
-    
     try:
-        # Check all files in the battleship directory
         for filename in os.listdir(battleship_dir):
             if filename.startswith(".battleship_connection_") and filename.endswith(".json"):
                 connection_file = os.path.join(battleship_dir, filename)
@@ -135,322 +118,763 @@ def check_any_recent_connections():
                         data = json.load(f)
                         username = data.get('username')
                         timestamp = data.get('timestamp', 0)
-                        disconnected = data.get('disconnected', False)  # Default to False if not set
-                        
-                        # Only include if it's a disconnected connection
-                        # Check if connection is recent (within 60 seconds)
+                        disconnected = data.get('disconnected', False)
                         elapsed = time.time() - timestamp
                         if elapsed <= 60 and username and disconnected:
                             recent_usernames.append((username, elapsed))
                 except:
                     continue
     except Exception as e:
-        print(f"[DEBUG] Error checking recent connections: {e}")
-    
-    # Sort by most recent first
+        # print(f"[DEBUG] Error checking recent connections: {e}")
+        pass
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
 
-def receive_messages(sock):
-    """
-    Continuously receive and display messages from the server using the protocol
-    """
-    global running, is_spectator
-    
-    # Track if spectator state has been detected
-    spectator_mode_detected = False
+class BattleshipGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Battleship Client")
+        self.geometry("1100x750")
 
-    while running:
-        try:
-            # Use protocol's receive_packet instead of readline
-            valid, header, payload = receive_packet(sock)
-            
-            if not valid:
-                print("\n[ERROR] Server sent corrupted data. Please restart the client to reconnect.")
-                if current_username:
-                    print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                    save_connection_info(current_username)
-                running = False
-                break
-                
-            if payload is None:
-                print("\n[ERROR] Server disconnected. Please restart the client to reconnect.")
-                if current_username:
-                    print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                    save_connection_info(current_username)
-                running = False
-                break
-            
-            magic, seq, packet_type, data_len = header
-            payload_str = payload.decode() if isinstance(payload, bytes) else payload
-            
-            # Check for messages that indicate spectator mode
-            if not spectator_mode_detected and packet_type == PACKET_TYPE_CHAT:
-                if "spectating" in payload_str.lower() or "spectator" in payload_str.lower():
-                    is_spectator = True
-                    spectator_mode_detected = True
-                    print("\n[INFO] You are in spectator mode. You can observe the game but cannot participate.")
-                    print("[INFO] Type 'quit' to leave spectator mode.")
-            
-            # Process different packet types
-            if packet_type == PACKET_TYPE_BOARD_UPDATE:
-                print("\n" + payload_str)
-            elif packet_type == PACKET_TYPE_GAME_START:
-                print(f"\n[GAME START] {payload_str}")
-            elif packet_type == PACKET_TYPE_GAME_END:
-                print(f"\n[GAME END] {payload_str}")
-                # Game is ending normally, remove connection file
-                if current_username:
-                    try:
-                        os.remove(get_connection_file(current_username))
-                        print("[DEBUG] Removed connection file as game ended normally")
-                    except:
-                        pass
-            elif packet_type == PACKET_TYPE_ERROR:
-                print(f"\n[ERROR] {payload_str}")
-                if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
-                    print("[ATTENTION] You have timed out! Please respond to avoid forfeiting your turn in future.")
-                # Save connection info if error indicates disconnection
-                if "disconnected" in payload_str.lower() or "connection lost" in payload_str.lower():
-                    if current_username:
-                        print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                        save_connection_info(current_username)
-            elif packet_type == PACKET_TYPE_RECONNECT:
-                print(f"\n[RECONNECTED] {payload_str}")
-                # Mark as active since reconnection was successful
-                if current_username:
-                    mark_connection_active(current_username)
-            elif packet_type == PACKET_TYPE_HEARTBEAT:
-                # Respond to heartbeat with ACK to maintain connection
-                print("[DEBUG] Received heartbeat, sending ACK")
-                send_packet(sock, PACKET_TYPE_ACK, b'')
-            elif packet_type == PACKET_TYPE_CHAT:
-                # Regular message (chat, etc.)
-                # Check if it's a chat message from another user
-                if payload_str.startswith("[CHAT]"):
-                    # Format and display chat message prominently
-                    # Check if it's a spectator message (from Spectator@IP)
-                    if "Spectator@" in payload_str:
-                        # Extract the username part (remove IP address)
-                        parts = payload_str.split(":", 1)
-                        if len(parts) == 2:
-                            spectator_info = parts[0].strip()
-                            message = parts[1].strip()
-                            # Extract username (could be just a number or identifier)
-                            if "@" in spectator_info:
-                                # Split to get the raw spectator username
-                                username = spectator_info.split("@")[1].split(":")[0]
-                                # Format as requested: "Username (spectator): message"
-                                formatted_message = f"{username} (spectator): {message}"
-                                print(f"\n{formatted_message}")
-                            else:
-                                # Fallback if format is unexpected
-                                print(f"\n{payload_str}")
-                        else:
-                            # Fallback if format is unexpected
-                            print(f"\n{payload_str}")
-                    else:
-                        # Regular chat message
-                        print(f"\n{payload_str}")
-                    print(">> ", end="", flush=True)  # Redisplay prompt
-                else:
-                    # Other server message
-                    print(payload_str)
-            else:
-                print(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
-                print(payload_str)
-                
-        except ConnectionResetError:
-            print("\n[ERROR] Connection to server was reset. Please restart the client to reconnect.")
-            if current_username:
-                print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                save_connection_info(current_username)
-            running = False
-            break
-        except BrokenPipeError:
-            print("\n[ERROR] Connection to server was broken. Please restart the client to reconnect.")
-            if current_username:
-                print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                save_connection_info(current_username)
-            running = False
-            break
-        except Exception as e:
-            print(f"\n[ERROR] Error receiving from server: {e}")
-            if current_username:
-                print(f"[INFO] Your username '{current_username}' was saved for reconnection.")
-                save_connection_info(current_username)
-            running = False
-            break
+        self.sock = None
+        self.server_message_queue = Queue()
+        self.network_thread = None
+        self.username = ""
+        self.is_spectator = False
+        self.running = True 
 
-def main():
-    global running, current_username, is_spectator
+        # Board and cell dimensions
+        self.board_size = 10
+        self.cell_size = 30
 
-    print("[INFO] Connecting to Battleship server...")
-    try:
-        # Check for recent connections
-        recent_connections = check_any_recent_connections()
+        # Ship placement state
+        self.is_placing_ships = False
+        self.ships_to_place_list = [] # List of tuples (ship_name, ship_length)
+        self.current_ship_to_place_idx = 0
+        self.current_ship_name = ""
+        self.current_ship_length = 0
+        self.selected_placement_coord = None # e.g. "A1"
+        self.placement_orientation_var = tk.StringVar(value="H") # Default to Horizontal
+
+        self._setup_ui()
+        self._prompt_for_username_and_connect()
         
-        # Ask user for username
-        username = ""
+        # Add a protocol to handle window close
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _setup_ui(self):
+        main_frame = tk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Create for game area and chat area
+        self.paned_window = tk.PanedWindow(main_frame, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=5)
+        self.paned_window.pack(fill=tk.BOTH, expand=True)
+
+        self.game_area_frame = tk.Frame(self.paned_window, relief=tk.SUNKEN, borderwidth=1)
+        self.paned_window.add(self.game_area_frame, width=750)
+
+        # Boards frame
+        self.boards_frame = tk.Frame(self.game_area_frame)
+        self.boards_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Player Board UI
+        self.player_board_frame = tk.Frame(self.boards_frame, relief=tk.SUNKEN, borderwidth=1)
+        self.player_board_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.player_board_label = tk.Label(self.player_board_frame, text="Your Board")
+        self.player_board_label.pack()
+        self.player_board_canvas = tk.Canvas(self.player_board_frame, 
+                                             width=self.cell_size * (self.board_size + 1), 
+                                             height=self.cell_size * (self.board_size + 1), 
+                                             bg="lightblue")
+        self.player_board_canvas.pack(pady=5)
+        self.player_board_canvas.bind("<Button-1>", self._on_player_board_click)
+
+        # Opponent Board UI
+        self.opponent_board_frame = tk.Frame(self.boards_frame, relief=tk.SUNKEN, borderwidth=1)
+        self.opponent_board_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        tk.Label(self.opponent_board_frame, text="Opponent's Board").pack()
+        self.opponent_board_canvas = tk.Canvas(self.opponent_board_frame, 
+                                               width=self.cell_size * (self.board_size + 1), 
+                                               height=self.cell_size * (self.board_size + 1), 
+                                               bg="lightcoral")
+        self.opponent_board_canvas.pack(pady=5)
+        self.opponent_board_canvas.bind("<Button-1>", self._on_opponent_board_click)
         
-        # Only prompt for reconnection if there are recent connections
-        if recent_connections:
-            print("\n[INFO] Recent disconnection(s) found:")
-            for i, (username, elapsed) in enumerate(recent_connections):
-                print(f"  {i+1}. {username} ({elapsed:.1f} seconds ago)")
+        # Ship Placement UI
+        self.placement_frame = tk.Frame(self.game_area_frame, pady=10)
+
+        self.placement_prompt_label = tk.Label(self.placement_frame, text="Ship Placement Options:")
+        self.placement_prompt_label.pack()
+        
+        self.manual_random_frame = tk.Frame(self.placement_frame) 
+        tk.Button(self.manual_random_frame, text="Place Manually", command=lambda: self._send_placement_choice("M")).pack(side=tk.LEFT, padx=5)
+        tk.Button(self.manual_random_frame, text="Place Randomly", command=lambda: self._send_placement_choice("R")).pack(side=tk.LEFT, padx=5)
+
+        self.current_ship_label = tk.Label(self.placement_frame, text="Placing: None")
+        self.current_ship_label.pack(pady=2)
+        self.selected_coord_label = tk.Label(self.placement_frame, text="Selected Start: None")
+        self.selected_coord_label.pack(pady=2)
+        orientation_frame = tk.Frame(self.placement_frame)
+        orientation_frame.pack()
+        tk.Label(orientation_frame, text="Orientation:").pack(side=tk.LEFT)
+        tk.Radiobutton(orientation_frame, text="Horizontal", variable=self.placement_orientation_var, value="H").pack(side=tk.LEFT)
+        tk.Radiobutton(orientation_frame, text="Vertical", variable=self.placement_orientation_var, value="V").pack(side=tk.LEFT)
+        self.confirm_placement_button = tk.Button(self.placement_frame, text="Confirm Ship Placement", command=self._confirm_ship_placement_action)
+        self.confirm_placement_button.pack(pady=5)
+
+        # Draw grid lines on canvases
+        self.draw_grid_lines(self.player_board_canvas)
+        self.draw_grid_lines(self.opponent_board_canvas)
+        
+        self.chat_area_frame = tk.Frame(self.paned_window, relief=tk.SUNKEN, borderwidth=1)
+        self.paned_window.add(self.chat_area_frame, minsize=250) # Min width for chat area
+
+        # Chat/Log display
+        self.chat_display = scrolledtext.ScrolledText(self.chat_area_frame, height=10, state=tk.DISABLED, wrap=tk.WORD)
+        self.chat_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Input field and send button
+        input_frame = tk.Frame(self.chat_area_frame)
+        input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
+        self.input_field = tk.Entry(input_frame)
+        self.input_field.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.input_field.bind("<Return>", self._send_input)
+        self.send_button = tk.Button(input_frame, text="Send Chat", command=self._send_input)
+        self.send_button.pack(side=tk.RIGHT)
+
+    def _toggle_ship_placement_ui(self, show=False, show_mr_choice=False):
+        if show:
+            self.placement_frame.pack(side=tk.TOP, fill=tk.X, pady=10, after=self.boards_frame)
+            if show_mr_choice:
+                self.manual_random_frame.pack(pady=5)
+                self.current_ship_label.pack_forget()
+                self.selected_coord_label.pack_forget()
                 
-            reconnect_choice = input("\nWould you like to reconnect? (Enter number to reconnect, or 'n' for a new connection): ").strip().lower()
-            
-            if reconnect_choice.isdigit() and 1 <= int(reconnect_choice) <= len(recent_connections):
-                # User selected a specific username to reconnect with
-                username = recent_connections[int(reconnect_choice)-1][0]
-                print(f"[INFO] Reconnecting as '{username}'...")
+                for child in self.placement_frame.winfo_children():
+                    if any(isinstance(grandchild, tk.Radiobutton) for grandchild in child.winfo_children()):
+                        child.pack_forget()
+                        break
+                self.confirm_placement_button.pack_forget()
             else:
-                # User wants a new connection, delete all recent connection files
-                for username_to_delete, _ in recent_connections:
-                    try:
-                        os.remove(get_connection_file(username_to_delete))
-                        print(f"[DEBUG] Deleted connection file for '{username_to_delete}'")
-                    except:
-                        pass
-                
-                # Ask for a new username
-                username = ""
-                while not username:
-                    username = input("Enter your username: ").strip()
-                    if not username:
-                        print("[ERROR] Username cannot be empty. Please try again.")
+                self.manual_random_frame.pack_forget()
+                self.current_ship_label.pack()
+                self.selected_coord_label.pack()
+
+                orientation_frame_found = False
+                for child in self.placement_frame.winfo_children():
+                    if any(isinstance(grandchild, tk.Radiobutton) for grandchild in child.winfo_children()):
+                        child.pack()
+                        orientation_frame_found = True
+                        break
+                self.confirm_placement_button.pack()
         else:
-            # No recent connections, ask for a username
-            while not username:
-                username = input("Enter your username: ").strip()
-                if not username:
-                    print("[ERROR] Username cannot be empty. Please try again.")
+            self.placement_frame.pack_forget()
+            self.manual_random_frame.pack_forget()
+        self.is_placing_ships = show and not show_mr_choice
+
+    def draw_grid_lines(self, canvas):
+        # Draw column labels (1-10)
+        for i in range(self.board_size):
+            x = (i + 1.5) * self.cell_size 
+            y = self.cell_size / 2
+            canvas.create_text(x, y, text=str(i + 1))
+
+        # Draw row labels (A-J)
+        for i in range(self.board_size):
+            x = self.cell_size / 2
+            y = (i + 1.5) * self.cell_size
+            canvas.create_text(x, y, text=chr(ord('A') + i))
         
-        # Store username globally for reconnection
-        current_username = username
+        grid_origin_x = self.cell_size
+        grid_origin_y = self.cell_size
 
-        # Connect to server
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((HOST, PORT))
-            print(f"[INFO] Connected to server at {HOST}:{PORT}")
+        for i in range(self.board_size + 1):
+            # Vertical lines
+            x0, y0 = grid_origin_x + i * self.cell_size, grid_origin_y
+            x1, y1 = grid_origin_x + i * self.cell_size, grid_origin_y + self.board_size * self.cell_size
+            canvas.create_line(x0, y0, x1, y1)
+            # Horizontal lines
+            x0, y0 = grid_origin_x, grid_origin_y + i * self.cell_size
+            x1, y1 = grid_origin_x + self.board_size * self.cell_size, grid_origin_y + i * self.cell_size
+            canvas.create_line(x0, y0, x1, y1)
+        
+        canvas.config(width=self.cell_size * (self.board_size + 1), height=self.cell_size * (self.board_size + 1))
+
+    def _canvas_coord_to_grid_coord(self, event_x, event_y):
+        grid_origin_x = self.cell_size
+        grid_origin_y = self.cell_size
+        
+        # Check if click is outside grid area (but within labeled area)
+        if event_x < grid_origin_x or event_y < grid_origin_y:
+            return None 
+        if event_x > grid_origin_x + self.board_size * self.cell_size or \
+           event_y > grid_origin_y + self.board_size * self.cell_size:
+            return None
+
+        col = int((event_x - grid_origin_x) / self.cell_size)
+        row = int((event_y - grid_origin_y) / self.cell_size)
+
+        if 0 <= row < self.board_size and 0 <= col < self.board_size:
+            return f"{chr(ord('A') + row)}{col + 1}"
+        return None
+
+    def _on_opponent_board_click(self, event):
+        if self.is_spectator or self.is_placing_ships: # Don't fire if spectator or placing ships
+            return
+
+        coord = self._canvas_coord_to_grid_coord(event.x, event.y)
+        if coord and self.sock:
+            self.log_message(f"[ACTION] Firing at {coord} on opponent's board (from click).")
+            send_packet(self.sock, PACKET_TYPE_MOVE, coord) 
+
+    def _on_player_board_click(self, event):
+        if not self.is_placing_ships or self.is_spectator:
+            return
+
+        coord = self._canvas_coord_to_grid_coord(event.x, event.y)
+        if coord:
+            self.selected_placement_coord = coord
+            self.selected_coord_label.config(text=f"Selected Start: {coord}")
+            self.log_message(f"[PLACEMENT] Selected starting cell: {coord} for {self.current_ship_name}")
+
+    def _prompt_manual_or_random_placement(self):
+        self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?")
+        self._toggle_ship_placement_ui(show=True, show_mr_choice=True)
+
+    def _send_placement_choice(self, choice): # "M" or "R"
+        if self.sock:
+            send_packet(self.sock, PACKET_TYPE_MOVE, choice)
+            self.log_message(f"[ACTION] Sent placement choice: {choice}")
+            self._toggle_ship_placement_ui(show=False) # Hide M/R choice UI
+            if choice.upper() == "M":
+                 self.log_message("[INFO] Waiting for server to send ship details for manual placement...")
+
+    def _start_manual_ship_placement(self, ships_string_from_server):
+        self.log_message(f"[INFO] Starting manual ship placement. Server says: {ships_string_from_server}")
+        
+        match = re.search(r"([A-Za-z\s]+)\s*\((\d+)\s*cells?\)", ships_string_from_server)
+        if match:
+            self.current_ship_name = match.group(1).strip()
+            self.current_ship_length = int(match.group(2))
+            self.log_message(f"[PLACEMENT] Now placing: {self.current_ship_name} (Length: {self.current_ship_length})")
+            self.current_ship_label.config(text=f"Placing: {self.current_ship_name} ({self.current_ship_length} cells)")
+            self.selected_coord_label.config(text="Selected Start: None")
+            self.selected_placement_coord = None
+            self._toggle_ship_placement_ui(show=True, show_mr_choice=False)
+        else:
+            self.log_message(f"[ERROR] Could not parse ship details from server: {ships_string_from_server}")
+            self._toggle_ship_placement_ui(show=False)
+
+
+    def _confirm_ship_placement_action(self):
+        if not self.selected_placement_coord:
+            messagebox.showwarning("Placement Error", "Please select a starting cell on your board.", parent=self)
+            return
+        if not self.current_ship_name:
+            messagebox.showerror("Placement Error", "No current ship to place. Waiting for server.", parent=self)
+            return
+
+        orientation = self.placement_orientation_var.get()
+        placement_command = f"{self.selected_placement_coord} {orientation}"
+        
+        self.log_message(f"[ACTION] Sending placement for {self.current_ship_name}: {placement_command}")
+        if self.sock:
+            send_packet(self.sock, PACKET_TYPE_MOVE, placement_command)
             
-            # Send username using protocol
-            if send_packet(s, PACKET_TYPE_USERNAME, username):
-                print(f"[INFO] Username '{username}' sent to server.")
-            else:
-                print("[ERROR] Failed to send username to server")
-                running = False
-                return # Exit if username cannot be sent
+        self.selected_coord_label.config(text="Selected Start: Waiting...")
 
-            # Initially save connection info, but mark as active (not disconnected)
-            save_connection_info(username)
-            mark_connection_active(username)  # Mark as active since connected successfully
+
+    def _prompt_for_username_and_connect(self):
+        global current_username 
+
+        recent_connections = check_any_recent_connections()
+        chosen_username = None
+
+        if recent_connections:
+            options = []
+            for i, (uname, elapsed) in enumerate(recent_connections):
+                options.append(f"{uname} (disconnected {elapsed:.0f}s ago)")
             
-            # Start a thread for receiving messages
-            receive_thread = threading.Thread(target=receive_messages, args=(s,))
-            receive_thread.daemon = True # This ensures the thread will exit when the main thread exits
-            receive_thread.start()
-
-            try:
-                # Display helpful information about expected client state
-                print("\n[INFO] Waiting for server response...")
-                print("[INFO] You may be placed as a player or spectator depending on server status.")
-                print("[INFO] Type any message to chat with other players and spectators.")
-                print("[INFO] Type 'quit' at any time to exit.")
-                
-                # Small delay to let initial messages come in
-                time.sleep(1)
-
-                # Main thread handles user input
-                while running:
+            dialog = ReconnectionDialog(self, "Reconnect?", options)
+            choice_index = dialog.choice
+            
+            if choice_index is not None and 0 <= choice_index < len(recent_connections):
+                chosen_username = recent_connections[choice_index][0]
+                self.log_message(f"[INFO] Attempting to reconnect as '{chosen_username}'...")
+            elif choice_index == -1: 
+                self.log_message("[INFO] Proceeding with a new connection.")
+                for uname_to_delete, _ in recent_connections:
                     try:
-                        user_input = input(">> ")
+                        os.remove(get_connection_file(uname_to_delete))
+                    except:
+                        pass 
+                chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
+            else:
+                self.log_message("[INFO] No reconnection selected or dialog cancelled. Please enter a username.")
+                chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
+        else:
+            chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
 
-                        if user_input.lower() == 'quit':
-                            print("[INFO] Quitting the game...")
-                            send_packet(s, PACKET_TYPE_DISCONNECT, "Quit requested by user")
-                            # Remove connection file when quitting deliberately
-                            try:
-                                os.remove(get_connection_file(current_username))
-                                print("[DEBUG] Removed connection file after quit command")
-                            except:
-                                pass
-                            running = False
-                            break
+        if not chosen_username:
+            self.log_message("[ERROR] Username cannot be empty. Exiting.")
+            messagebox.showerror("Error", "Username cannot be empty. The application will now close.")
+            self.destroy()
+            return
+
+        self.username = chosen_username
+        current_username = self.username 
+
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((HOST, PORT))
+            self.log_message(f"[INFO] Connected to server at {HOST}:{PORT}")
+
+            if send_packet(self.sock, PACKET_TYPE_USERNAME, self.username):
+                self.log_message(f"[INFO] Username '{self.username}' sent to server.")
+                save_connection_info(self.username) 
+                mark_connection_active(self.username) 
+                
+                self.network_thread = threading.Thread(target=self._receive_messages_thread, daemon=True)
+                self.network_thread.start()
+                
+                self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue)
+                
+                self.log_message("[INFO] Waiting for server response...")
+                self.log_message("[INFO] You may be placed as a player or spectator.")
+                self.log_message("[INFO] Type messages in the input field below and press Enter or Send Chat.")
+                self.log_message("[INFO] Click on opponent's board to fire. Follow prompts for ship placement.")
+
+
+            else:
+                self.log_message("[ERROR] Failed to send username to server.")
+                messagebox.showerror("Connection Error", "Failed to send username to server.")
+                if self.sock: self.sock.close()
+                self.destroy()
+        except ConnectionRefusedError:
+            self.log_message(f"[ERROR] Could not connect to server at {HOST}:{PORT}. Check if server is running.")
+            messagebox.showerror("Connection Error", f"Could not connect to server at {HOST}:{PORT}.\\nCheck if the server is running.")
+            self.destroy()
+        except Exception as e:
+            self.log_message(f"[ERROR] Connection error: {e}")
+            messagebox.showerror("Connection Error", f"An unexpected connection error occurred: {e}")
+            if self.sock: self.sock.close()
+            self.destroy()
+
+    def _receive_messages_thread(self):
+        global is_spectator 
+        spectator_mode_detected_local = False 
+
+        while self.running and self.sock:
+            try:
+                valid, header, payload = receive_packet(self.sock) 
+                if not self.running: break 
+
+                if not valid:
+                    self.server_message_queue.put(("error", "Server sent corrupted data."))
+                    self.server_message_queue.put(("disconnect_event", None))
+                    break
+                
+                if payload is None: 
+                    self.server_message_queue.put(("error", "Server disconnected."))
+                    self.server_message_queue.put(("disconnect_event", None))
+                    break
+                
+                magic, seq, packet_type, data_len = header
+                payload_str = payload.decode() if isinstance(payload, bytes) else payload
+                
+                self.server_message_queue.put(("packet", packet_type, payload_str))
+
+                if not spectator_mode_detected_local and packet_type == PACKET_TYPE_CHAT:
+                    if "spectating" in payload_str.lower() or "spectator" in payload_str.lower():
+                        self.server_message_queue.put(("spectator_mode_on", None))
+                        spectator_mode_detected_local = True
                         
-                        # Send user input to server using the protocol
-                        # Determine packet type based on input
-                        if len(user_input) == 0:
-                            # Skip empty input
-                            continue
-                        elif user_input.lower().startswith("fire ") or (len(user_input) <= 3 and any(c.isalpha() and c.upper() in "ABCDEFGHIJ" for c in user_input)):
-                            # This is a game move (fire command or coordinate)
-                            if not send_packet(s, PACKET_TYPE_MOVE, user_input):
-                                print("[ERROR] Failed to send move to server")
-                        elif user_input.upper() in ["H", "V", "M", "R", "Y", "N", "YES", "NO"]:
-                            # Ship placement or yes/no response
-                            if not send_packet(s, PACKET_TYPE_MOVE, user_input):
-                                print("[ERROR] Failed to send move to server")
-                        else:
-                            # Treat as chat message
-                            if not send_packet(s, PACKET_TYPE_CHAT, user_input):
-                                print("[ERROR] Failed to send message to server")
-                            # If user is spectator - put in front of chat messages
-                            elif is_spectator:
-                                # Format consistent with received messages
-                                username = current_username.split('@')[0] if '@' in current_username else current_username
-                                print(f"\n{username} (spectator): {user_input}")
-                                print(">> ", end="", flush=True)  # Redisplay prompt
-                            else:
-                                # Echo own chat message locally
-                                print(f"\n{current_username}: {user_input}")
-                                print(">> ", end="", flush=True)  # Redisplay prompt
+            except ConnectionResetError:
+                if self.running: self.server_message_queue.put(("error", "Connection to server was reset."))
+                self.server_message_queue.put(("disconnect_event", None))
+                break
+            except BrokenPipeError:
+                if self.running: self.server_message_queue.put(("error", "Connection to server was broken."))
+                self.server_message_queue.put(("disconnect_event", None))
+                break
+            except socket.timeout: 
+                if self.running: self.log_message("[DEBUG] Socket timeout in receive thread (should be handled by receive_packet).")
+                continue 
+            except OSError as e: 
+                 if self.running: self.server_message_queue.put(("error", f"Socket error: {e}"))
+                 self.server_message_queue.put(("disconnect_event", None))
+                 break
+            except Exception as e:
+                if self.running: self.server_message_queue.put(("error", f"Error receiving from server: {e}"))
+                self.server_message_queue.put(("disconnect_event", None))
+                break
 
-                    except KeyboardInterrupt:
-                        print("\n[INFO] Client exiting due to keyboard interrupt.")
-                        send_packet(s, PACKET_TYPE_DISCONNECT, "Keyboard interrupt")
-                        # Remove connection file on clean exit
-                        try:
-                            os.remove(get_connection_file(current_username))
-                            print("[DEBUG] Removed connection file after keyboard interrupt")
-                        except:
-                            pass
-                        running = False
-                        break
-                    except EOFError:
-                        print("\n[INFO] End of input reached. Exiting...")
-                        send_packet(s, PACKET_TYPE_DISCONNECT, "EOF reached")
-                        try:
-                            os.remove(get_connection_file(current_username))
-                            print("[DEBUG] Removed connection file after EOF")
-                        except:
-                            pass
-                        running = False
-                        break
-                    except Exception as e:
-                        print(f"\n[ERROR] Unexpected error: {e}")
-                        running = False
-                        break
 
-            except KeyboardInterrupt:
-                print("\n[INFO] Client exiting due to keyboard interrupt.")
-                send_packet(s, PACKET_TYPE_DISCONNECT, "Keyboard interrupt")
+    def _process_gui_queue(self):
+        global current_username, is_spectator
+
+        while not self.server_message_queue.empty():
+            try:
+                msg_type, *data = self.server_message_queue.get_nowait()
+
+                if msg_type == "packet":
+                    packet_type, payload_str = data[0], data[1]
+                    self._handle_packet(packet_type, payload_str)
+                elif msg_type == "error":
+                    error_msg = data[0]
+                    self.log_message(f"[ERROR] {error_msg}")
+                    if "username already in use" in error_msg.lower() or \
+                       "expected username packet first" in error_msg.lower() or \
+                       "username cannot be empty" in error_msg.lower():
+                        messagebox.showerror("Connection Error", error_msg)
+                        self._shutdown_client() 
+                        return 
+                elif msg_type == "disconnect_event":
+                    self.log_message("[INFO] Disconnected from server. Saving connection info if applicable.")
+                    if self.username: 
+                         save_connection_info(self.username)
+                    self.input_field.config(state=tk.DISABLED)
+                    self.send_button.config(state=tk.DISABLED)
+                    self._toggle_ship_placement_ui(show=False)
+                    
+                    if self.running: 
+                         messagebox.showinfo("Disconnected", "Disconnected from server. You may need to restart the client.")
+                    self.running = False 
+                    return 
+                elif msg_type == "spectator_mode_on":
+                    self.is_spectator = True
+                    is_spectator = True 
+                    self.log_message("\n[INFO] You are in spectator mode. Observe the game; no moves allowed.")
+                    self.title(f"Battleship Client - {self.username} (Spectator)")
+            except Exception as e:
+                self.log_message(f"[ERROR] Error processing GUI queue: {e}")
+
+        if self.running:
+            self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue) 
+
+    def _handle_packet(self, packet_type, payload_str):
+        global current_username
+
+        if packet_type == PACKET_TYPE_BOARD_UPDATE:
+            self.log_message("\n" + payload_str) 
+            self.update_boards_from_string(payload_str)
+            
+            if self.is_placing_ships and "All ships have been placed" in payload_str :
+                 self._toggle_ship_placement_ui(show=False)
+        elif packet_type == PACKET_TYPE_GAME_START:
+            self.log_message(f"\n[GAME START] {payload_str}")
+            self.player_board_label.config(text=f"Your Board ({self.username})")
+        elif packet_type == PACKET_TYPE_GAME_END:
+            self.log_message(f"\n[GAME END] {payload_str}")
+            self._toggle_ship_placement_ui(show=False)
+            if self.username: 
                 try:
-                    os.remove(get_connection_file(current_username))
-                    print("[DEBUG] Removed connection file after keyboard interrupt")
-                except:
+                    os.remove(get_connection_file(self.username))
+                    self.log_message("[DEBUG] Removed connection file as game ended normally.")
+                except: pass
+        elif packet_type == PACKET_TYPE_ERROR:
+            self.log_message(f"\n[ERROR] {payload_str}")
+            if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
+                 self.log_message("[ATTENTION] You have timed out! Please respond promptly.")
+            if self.username and ("disconnected" in payload_str.lower() or "connection lost" in payload_str.lower() or "username already in use" in payload_str.lower()):
+                save_connection_info(self.username)
+                self.log_message(f"[INFO] Your username '{self.username}' was saved for potential reconnection.")
+            if "Invalid placement" in payload_str:
+                self.log_message("[PLACEMENT ERROR] Server rejected ship placement. Try again.")
+                self.selected_coord_label.config(text="Selected Start: Invalid!")
+
+
+        elif packet_type == PACKET_TYPE_RECONNECT:
+            self.log_message(f"\n[RECONNECTED] {payload_str}")
+            if self.username:
+                mark_connection_active(self.username)
+        elif packet_type == PACKET_TYPE_HEARTBEAT:
+            self.log_message("[DEBUG] Received heartbeat, sending ACK")
+            if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')
+        elif packet_type == PACKET_TYPE_CHAT:
+            if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
+                self._prompt_manual_or_random_placement()
+            elif "Place your" in payload_str and "cells)." in payload_str and self.username in payload_str:
+                # Example: "Player <username>, place your Carrier (5 cells)."
+                self._start_manual_ship_placement(payload_str)
+            elif "All ships have been placed" in payload_str: # Player's or opponent's
+                self.log_message(payload_str)
+                if self.is_placing_ships:
+                    self._toggle_ship_placement_ui(show=False)
+            elif "Invalid placement. Try again" in payload_str:
+                self.log_message(f"[SERVER] {payload_str}")
+                # Keep placement UI open for user to retry.
+                self.selected_coord_label.config(text="Selected Start: Invalid!")
+            elif "already contains a ship" in payload_str:
+                 self.log_message(f"[SERVER] {payload_str}")
+                 self.selected_coord_label.config(text="Selected Start: Overlap!")
+
+            # Regular chat message handling
+            elif "Spectator@" in payload_str and payload_str.startswith("[CHAT]"):
+                try:
+                    parts = payload_str.split(":", 2) 
+                    sender_info_part = parts[0].replace("[CHAT]", "").strip() 
+                    message_part = parts[1].strip() if len(parts) == 2 else (parts[2].strip() if len(parts) > 2 else "")
+                    if "Spectator@" in sender_info_part:
+                        spectator_name = sender_info_part.split("@")[0].strip() 
+                        formatted_message = f"{spectator_name} (spectator): {message_part}"
+                        self.log_message(f"\n{formatted_message}")
+                    else: 
+                        self.log_message(f"\n{payload_str}") 
+                except IndexError:
+                     self.log_message(f"\n{payload_str}") 
+            else:
+                self.log_message(payload_str) # Display as is
+        else:
+            self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
+            self.log_message(payload_str)
+        
+        self.chat_display.see(tk.END) 
+
+    def update_boards_from_string(self, board_string):
+        self.log_message("[GUI Board Update Triggered]") 
+        
+        lines = board_string.strip().split('\n')
+        
+        player_grid_data = []
+        opponent_grid_data = []
+        current_parsing_grid = None 
+
+        for line in lines:
+            line_strip = line.strip()
+            if not line_strip: 
+                current_parsing_grid = None 
+                continue
+
+            if "Your Grid:" in line_strip or ("SPECTATOR_GRID" in line_strip and self.is_spectator):
+                current_parsing_grid = "player" 
+                if "SPECTATOR_GRID" in line_strip:
+                    self.player_board_label.config(text="Game View (Spectator)")
+                else:
+                    self.player_board_label.config(text=f"Your Board ({self.username})")
+                continue
+            elif "Opponent's Grid:" in line_strip and not self.is_spectator:
+                current_parsing_grid = "opponent"
+                continue
+            
+            if line_strip and (line_strip[0].isspace() or line_strip.startswith("SPECTATOR_GRID")):
+                 if line_strip.strip().replace(" ","").replace("SPECTATOR_GRID","").isdigit():
+                    continue
+                 if line_strip.startswith("SPECTATOR_GRID") and current_parsing_grid == "player":
+                     pass
+                 elif line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
+                     continue
+
+
+            if current_parsing_grid and line_strip and line_strip[0].isalpha():
+                cells = [c for c in line_strip.split(' ') if c] 
+                if cells: 
+                    row_char = cells.pop(0) 
+                    if len(cells) == self.board_size: # Ensure correct number of cells
+                        if current_parsing_grid == "player":
+                            player_grid_data.append(cells)
+                        elif current_parsing_grid == "opponent":
+                            opponent_grid_data.append(cells)
+                    else:
+                        self.log_message(f"[DEBUG] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'")
+
+        
+        if player_grid_data:
+            self.log_message(f"[DEBUG] Drawing player grid with data: {player_grid_data}")
+            self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
+        if opponent_grid_data:
+            self.log_message(f"[DEBUG] Drawing opponent grid with data: {opponent_grid_data}")
+            self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
+
+
+    def draw_board_on_canvas(self, canvas, grid_data):
+        canvas.delete("cells")
+
+        grid_origin_x = self.cell_size
+        grid_origin_y = self.cell_size
+        padding = 3 # Small padding for elements within cells
+        dot_radius_factor = 0.3 # Factor of cell_size for dot radius
+
+        # Define base cell background
+        canvas_bg = canvas.cget('bg')
+        water_bg_color = "#4682B4"
+
+        for r, row_data in enumerate(grid_data):
+            if r >= self.board_size: continue 
+            for c, cell_char in enumerate(row_data):
+                if c >= self.board_size: continue
+
+                x0 = grid_origin_x + c * self.cell_size
+                y0 = grid_origin_y + r * self.cell_size
+                x1 = x0 + self.cell_size
+                y1 = y0 + self.cell_size
+                
+                # Draw a base rectangle for the cell
+                canvas.create_rectangle(x0, y0, x1, y1, fill=water_bg_color, outline='black', tags="cells")
+
+                center_x = x0 + self.cell_size / 2
+                center_y = y0 + self.cell_size / 2
+                radius = self.cell_size * dot_radius_factor
+
+                if cell_char == '.': # Water
                     pass
-                running = False
-            
-            # Give the receive thread time to display any final messages
-            time.sleep(0.5)
-            
-    except ConnectionRefusedError:
-        print(f"[ERROR] Could not connect to server at {HOST}:{PORT} - Check that the server is running.")
-    except Exception as e:
-        print(f"[ERROR] Connection error: {e}")
+
+                elif cell_char == 'S': # Ship
+                    canvas.create_rectangle(x0 + padding, y0 + padding, 
+                                            x1 - padding, y1 - padding, 
+                                            fill='darkgray', outline='black', width=1, tags="cells")
+
+                elif cell_char == 'o': # Miss
+                    # Draw miss on top of the water_bg_color
+                    canvas.create_oval(center_x - radius, center_y - radius, 
+                                        center_x + radius, center_y + radius, 
+                                        fill='white', outline='white', tags="cells")
+
+                elif cell_char == 'X': # Hit
+                    canvas.create_rectangle(x0, y0, x1, y1, fill='#DC143C', outline='black', tags="cells")
+                    # Draw an X on top
+                    canvas.create_line(x0 + padding*2, y0 + padding*2, 
+                                        x1 - padding*2, y1 - padding*2, 
+                                        fill='black', width=3, tags="cells")
+                    canvas.create_line(x0 + padding*2, y1 - padding*2, 
+                                        x1 - padding*2, y0 + padding*2, 
+                                        fill='black', width=3, tags="cells")
+                
+                elif cell_char == '?': # Unknown (opponent's board before reveal)
+                    canvas.create_rectangle(x0, y0, x1, y1, fill='#D3D3D3', outline='black', tags="cells") # LightGray
+
+
+    def _send_input(self, event=None): 
+        global current_username, is_spectator 
+
+        if not self.sock or not self.running:
+            self.log_message("[ERROR] Not connected to server.")
+            return
+
+        user_input = self.input_field.get().strip()
+        if not user_input:
+            return
+
+        self.input_field.delete(0, tk.END) 
+
+        if user_input.lower() == 'quit':
+            self.log_message("[INFO] Quitting the game...")
+            if self.sock: send_packet(self.sock, PACKET_TYPE_DISCONNECT, "Quit requested by user")
+            self._shutdown_client(save_info=False) 
+            return
+
+        packet_to_send_type = PACKET_TYPE_CHAT 
+        message_to_send = user_input
+
+        coord_match = re.fullmatch(r"([A-Ja-j])([1-9]|10)", user_input.upper())
+        
+        if coord_match and not self.is_placing_ships and not self.is_spectator:
+            packet_to_send_type = PACKET_TYPE_MOVE
+            message_to_send = user_input.upper()
+            self.log_message(f"[ACTION] Sending fire coordinate from input: {message_to_send}")
+        elif user_input.upper() in ["Y", "N", "YES", "NO", "M", "R"] and not self.is_spectator:
+            if not self.is_placing_ships or (self.is_placing_ships and user_input.upper() in ["M", "R"]):
+                packet_to_send_type = PACKET_TYPE_MOVE
+                message_to_send = user_input.upper()
+                self.log_message(f"[ACTION] Sending game command from input: {message_to_send}")
+
+        if self.is_spectator and packet_to_send_type == PACKET_TYPE_MOVE:
+            self.log_message("[INFO] Spectators cannot make game moves. Your message sent as chat.")
+            packet_to_send_type = PACKET_TYPE_CHAT 
+            message_to_send = user_input 
+
+        if self.sock and send_packet(self.sock, packet_to_send_type, message_to_send):
+            if packet_to_send_type == PACKET_TYPE_CHAT:
+                display_name = self.username
+                if self.is_spectator:
+                    display_name += " (spectator)"
+                self.log_message(f"\n{display_name}: {user_input}") 
+        else:
+            self.log_message("[ERROR] Failed to send message to server.")
+
+    def log_message(self, message):
+        if self.chat_display.winfo_exists():
+            self.chat_display.config(state=tk.NORMAL)
+            self.chat_display.insert(tk.END, message + "\n")
+            self.chat_display.config(state=tk.DISABLED)
+            self.chat_display.see(tk.END)
+        else:
+            print(f"[LOG (Chat Display N/A)]: {message}")
+
+
+    def _on_closing(self):
+        if messagebox.askokcancel("Quit", "Do you want to quit Battleship?"):
+            self.log_message("[INFO] Quit by closing window.")
+            if self.sock:
+                 send_packet(self.sock, PACKET_TYPE_DISCONNECT, "Client closed window")
+            self._shutdown_client(save_info=True) 
+
+    def _shutdown_client(self, save_info=True):
+        self.running = False 
+        if self.username and save_info:
+            save_connection_info(self.username) 
+        
+        if self.network_thread and self.network_thread.is_alive():
+            if self.sock:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR) 
+                except OSError: pass 
+                try:
+                    self.sock.close()
+                except OSError: pass
+
+        if self.winfo_exists(): # Check if window still exists before destroying
+            self.destroy()
+
+# Dialog for Reconnection
+class ReconnectionDialog(simpledialog.Dialog):
+    def __init__(self, parent, title, options):
+        self.options = options
+        self.choice = None 
+        super().__init__(parent, title)
+
+    def body(self, master):
+        tk.Label(master, text="Recent disconnection(s) found:").pack(pady=5)
+        self.listbox = tk.Listbox(master, selectmode=tk.SINGLE, exportselection=False)
+        for i, option_text in enumerate(self.options):
+            self.listbox.insert(tk.END, f"{i+1}. {option_text}")
+        self.listbox.pack(padx=10, pady=5)
+        self.listbox.bind("<Double-Button-1>", self.ok) 
+        return self.listbox 
+
+    def buttonbox(self):
+        box = tk.Frame(self)
+        tk.Button(box, text="Reconnect Selected", width=20, command=self.ok, default=tk.ACTIVE).pack(side=tk.LEFT, padx=5, pady=5)
+        tk.Button(box, text="New Connection", width=15, command=self.new_connection).pack(side=tk.LEFT, padx=5, pady=5)
+        tk.Button(box, text="Cancel", width=10, command=self.cancel).pack(side=tk.LEFT, padx=5, pady=5)
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+        box.pack()
+
+    def ok(self, event=None):
+        selection = self.listbox.curselection()
+        if selection:
+            self.choice = selection[0]
+        else:
+            self.choice = None 
+        super().ok()
+    
+    def new_connection(self):
+        self.choice = -1 
+        super().ok() 
+
+    def cancel(self):
+        self.choice = None 
+        super().cancel()
+
 
 if __name__ == "__main__":
-    main()
-    print("[INFO] Client terminated.")
+    app = BattleshipGUI()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        if hasattr(app, 'running') and app.running : 
+             if hasattr(app, 'log_message'): app.log_message("[INFO] Client exiting due to keyboard interrupt.")
+             if hasattr(app, '_shutdown_client'): app._shutdown_client(save_info=True)
+    finally:
+        pass

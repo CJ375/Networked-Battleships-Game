@@ -1017,35 +1017,42 @@ def check_username_available(username):
     # Next check if username is already in active usernames
     with active_usernames_lock:
         if username in active_usernames:
-            # Check if the connection is still valid
-            try:
-                # Try to send a heartbeat to see if the connection is still alive
-                if not send_packet(active_usernames[username], PACKET_TYPE_HEARTBEAT, ""):
-                    print(f"[DEBUG] '{username}' has a dead connection in active_usernames, removing it")
-                    del active_usernames[username]
-                    # Add to disconnected players for a short reconnection window
-                    with disconnected_players_lock:
-                        if username not in disconnected_players:
-                            disconnected_players[username] = {
-                                'disconnect_time': time.time(),
-                            }
-                            print(f"[DEBUG] '{username}' marked as disconnected after connection check")
-                    return (False, "disconnected")
-                else:
-                    print(f"[DEBUG] '{username}' is already in active_usernames with an active connection")
+            existing_conn = active_usernames.get(username)
+            if not existing_conn:
+                print(f"[DEBUG] Anomaly: '{username}' was in active_usernames set but not retrievable via .get(). Proceeding as if not active.")
+            else:
+                print(f"[DEBUG] Username '{username}' found in active_usernames. Verifying existing connection status.")
+                is_connection_alive = False
+                try:
+                    if send_packet(existing_conn, PACKET_TYPE_HEARTBEAT, ""):
+                        print(f"[DEBUG] Heartbeat sent to existing connection for '{username}' successfully. Connection appears active.")
+                        is_connection_alive = True
+                    else:
+                        print(f"[DEBUG] Heartbeat to '{username}' failed (send_packet returned False). Treating as stale connection.")
+                except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+                    print(f"[DEBUG] Socket error while sending heartbeat to '{username}': {e}. Treating as stale connection.")
+                except Exception as e_other:
+                    print(f"[DEBUG] Unexpected error sending heartbeat to '{username}': {e_other}. Treating as stale connection.")
+
+                if is_connection_alive:
                     return (False, "Username already in use by another player.")
-            except:
-                # If there's an error communicating, the connection is likely dead
-                print(f"[DEBUG] Exception when checking '{username}' connection, removing from active_usernames")
-                del active_usernames[username]
-                # Add to disconnected players for a short reconnection window
-                with disconnected_players_lock:
-                    if username not in disconnected_players:
-                        disconnected_players[username] = {
-                            'disconnect_time': time.time(),
-                        }
-                        print(f"[DEBUG] '{username}' marked as disconnected after exception")
-                return (False, "disconnected")
+                else:
+                    print(f"[DEBUG] Cleaning up stale/dead active connection for '{username}'.")
+                    try:
+                        existing_conn.close()
+                    except Exception as e_close:
+                        print(f"[DEBUG] Error closing stale connection for '{username}': {e_close}")
+                    
+                    if username in active_usernames and active_usernames.get(username) == existing_conn:
+                        del active_usernames[username]
+                    
+                    with disconnected_players_lock:
+                        # Preserve any existing game-specific data if this user was in a game.
+                        player_data = disconnected_players.get(username, {}) 
+                        player_data['disconnect_time'] = time.time()
+                        disconnected_players[username] = player_data
+                        print(f"[DEBUG] Marked '{username}' as disconnected after cleaning stale active entry. New connection can attempt to reconnect.")
+                    return (False, "disconnected")
         else:
             print(f"[DEBUG] '{username}' is not in active_usernames")
     
