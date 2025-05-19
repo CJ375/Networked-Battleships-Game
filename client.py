@@ -37,17 +37,19 @@ current_username = ""
 # Flag indicating if the user is in spectator mode
 is_spectator = False
 
-# Use a standard location for the connection file
-# This way reconnection works regardless of environment variables
-user_home = os.path.expanduser("~")
-battleship_dir = os.path.join(user_home, ".battleship")
-os.makedirs(battleship_dir, exist_ok=True)
+# Define the storage directory for connection files within the project folder
+# This uses the current working directory, assuming the script is run from the project root.
+project_root = os.getcwd() 
+battleship_dir = os.path.join(project_root, ".reconnection_data")
+os.makedirs(battleship_dir, exist_ok=True) # Ensure the directory exists
 
 # Create a unique connection file per username to allow multiple players on the same machine
 def get_connection_file(username):
     """Get the connection file path for a specific username"""
     if not username:
         return None
+    # Store connection info in a unique file per username within this directory
+    # This allows multiple players on the same machine to reconnect without conflicts
     return os.path.join(battleship_dir, f".battleship_connection_{username}.json")
 
 def save_connection_info(username):
