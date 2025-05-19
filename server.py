@@ -57,7 +57,7 @@ current_games_lock = threading.Lock()
 
 # Global game object for spectators
 from battleship import BOARD_SIZE
-class DummyGame:
+class DummyGame: # This is a dummy game object for spectators when no real game is in progress - earlier issues with this
     def __init__(self):
         self.board_size = BOARD_SIZE
         self.player1 = "Waiting for players"
@@ -67,7 +67,7 @@ class DummyGame:
         self.last_move = None
         self.last_move_result = None
 
-class RealGame:
+class RealGame: # This is a real game object for players when a game is in progress
     def __init__(self, player1, player2):
         self.board_size = BOARD_SIZE
         self.player1 = player1
