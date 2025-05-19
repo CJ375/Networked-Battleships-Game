@@ -1084,7 +1084,6 @@ def handle_reconnection(conn, addr, username):
             del disconnected_players[username]
             return False
             
-        # Reconnection is valid - remove from disconnected_players
         print(f"[INFO] {username} successfully reconnected to their game after {elapsed:.1f}s")
         
         # Add to active usernames

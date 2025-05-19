@@ -238,6 +238,24 @@ class BattleshipGUI(tk.Tk):
         self.chat_display = scrolledtext.ScrolledText(self.chat_area_frame, height=10, state=tk.DISABLED, wrap=tk.WORD)
         self.chat_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Define tags for message styling
+        self.chat_display.tag_configure("timestamp", foreground="#888888", font=("Helvetica", 8))
+        self.chat_display.tag_configure("self_msg_sender", foreground="blue", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("self_msg_text", foreground="blue")
+        self.chat_display.tag_configure("other_msg_sender", foreground="green", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("other_msg_text", foreground="black")
+        self.chat_display.tag_configure("spectator_msg_sender", foreground="purple", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("spectator_msg_text", foreground="purple")
+        self.chat_display.tag_configure("server_info_sender", foreground="orange", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("server_info_text", foreground="orange")
+        self.chat_display.tag_configure("error_msg_sender", foreground="red", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("error_msg_text", foreground="red")
+        self.chat_display.tag_configure("game_event_text", foreground="#555555", font=("Helvetica", 9, "italic"))
+        self.chat_display.tag_configure("action_log_text", foreground="darkcyan", font=("Helvetica", 9))
+        self.chat_display.tag_configure("placement_log_text", foreground="magenta", font=("Helvetica", 9))
+        self.chat_display.tag_configure("debug_log_text", foreground="gray", font=("Helvetica", 8, "italic"))
+
+
         # Input field and send button
         input_frame = tk.Frame(self.chat_area_frame)
         input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
@@ -316,12 +334,12 @@ class BattleshipGUI(tk.Tk):
 
         coord = self._canvas_coord_to_grid_coord(event.x, event.y)
         if coord and self.sock:
-            self.log_message(f"[ACTION] Firing at {coord} on opponent's board (from click).")
+            self.log_message(f"[ACTION] Firing at {coord} on opponent's board (from click).", msg_type="action_log")
             if send_packet(self.sock, PACKET_TYPE_MOVE, coord):
                 self.last_fired_coord = coord
                 self.awaiting_shot_result = True
             else:
-                self.log_message("[ERROR] Failed to send fire command.")
+                self.log_message("[ERROR] Failed to send fire command.", msg_type="error")
 
     def _on_player_board_click(self, event):
         if not self.is_placing_ships or self.is_spectator:
@@ -331,34 +349,34 @@ class BattleshipGUI(tk.Tk):
         if coord:
             self.selected_placement_coord = coord
             self.selected_coord_label.config(text=f"Selected Start: {coord}")
-            self.log_message(f"[PLACEMENT] Selected starting cell: {coord} for {self.current_ship_name}")
+            self.log_message(f"[PLACEMENT] Selected starting cell: {coord} for {self.current_ship_name}", msg_type="placement_log")
 
     def _prompt_manual_or_random_placement(self):
-        self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?")
+        self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?", msg_type="server_info")
         self._toggle_ship_placement_ui(show=True, show_mr_choice=True)
 
     def _send_placement_choice(self, choice):
         if self.sock:
             send_packet(self.sock, PACKET_TYPE_MOVE, choice)
-            self.log_message(f"[ACTION] Sent placement choice: {choice}")
+            self.log_message(f"[ACTION] Sent placement choice: {choice}", msg_type="action_log")
             self._toggle_ship_placement_ui(show=False)
             if choice.upper() == "M":
-                 self.log_message("[INFO] Waiting for server to send ship details for manual placement...")
+                 self.log_message("[INFO] Waiting for server to send ship details for manual placement...", msg_type="info")
 
     def _start_manual_ship_placement(self, ships_string_from_server):
-        self.log_message(f"[INFO] Starting manual ship placement. Server says: {ships_string_from_server}")
+        self.log_message(f"[INFO] Starting manual ship placement. Server says: {ships_string_from_server}", msg_type="info")
         
-        match = re.search(r"([A-Za-z\s]+)\s*\((\d+)\s*cells?\)", ships_string_from_server)
+        match = re.search(r"Placing your ([A-Za-z\s]+)\s*\(size (\d+)\)\.", ships_string_from_server)
         if match:
             self.current_ship_name = match.group(1).strip()
             self.current_ship_length = int(match.group(2))
-            self.log_message(f"[PLACEMENT] Now placing: {self.current_ship_name} (Length: {self.current_ship_length})")
+            self.log_message(f"[PLACEMENT] Now placing: {self.current_ship_name} (Length: {self.current_ship_length})", msg_type="info")
             self.current_ship_label.config(text=f"Placing: {self.current_ship_name} ({self.current_ship_length} cells)")
             self.selected_coord_label.config(text="Selected Start: None")
             self.selected_placement_coord = None
             self._toggle_ship_placement_ui(show=True, show_mr_choice=False)
         else:
-            self.log_message(f"[ERROR] Could not parse ship details from server: {ships_string_from_server}")
+            self.log_message(f"[ERROR] Could not parse ship details from server: {ships_string_from_server}", msg_type="error")
             self._toggle_ship_placement_ui(show=False)
 
 
@@ -373,7 +391,7 @@ class BattleshipGUI(tk.Tk):
         orientation = self.placement_orientation_var.get()
         placement_command = f"{self.selected_placement_coord} {orientation}"
         
-        self.log_message(f"[ACTION] Sending placement for {self.current_ship_name}: {placement_command}")
+        self.log_message(f"[ACTION] Sending placement for {self.current_ship_name}: {placement_command}", msg_type="action_log")
         if self.sock:
             send_packet(self.sock, PACKET_TYPE_MOVE, placement_command)
             
@@ -396,9 +414,9 @@ class BattleshipGUI(tk.Tk):
             
             if choice_index is not None and 0 <= choice_index < len(recent_connections):
                 chosen_username = recent_connections[choice_index][0]
-                self.log_message(f"[INFO] Attempting to reconnect as '{chosen_username}'...")
+                self.log_message(f"[INFO] Attempting to reconnect as '{chosen_username}'...", msg_type="info")
             elif choice_index == -1: 
-                self.log_message("[INFO] Proceeding with a new connection.")
+                self.log_message("[INFO] Proceeding with a new connection.", msg_type="info")
                 for uname_to_delete, _ in recent_connections:
                     try:
                         os.remove(get_connection_file(uname_to_delete))
@@ -406,13 +424,13 @@ class BattleshipGUI(tk.Tk):
                         pass 
                 chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
             else:
-                self.log_message("[INFO] No reconnection selected or dialog cancelled. Please enter a username.")
+                self.log_message("[INFO] No reconnection selected or dialog cancelled. Please enter a username.", msg_type="info")
                 chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
         else:
             chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
 
         if not chosen_username:
-            self.log_message("[ERROR] Username cannot be empty. Exiting.")
+            self.log_message("[ERROR] Username cannot be empty. Exiting.", msg_type="error")
             messagebox.showerror("Error", "Username cannot be empty. The application will now close.")
             self.destroy()
             return
@@ -423,10 +441,10 @@ class BattleshipGUI(tk.Tk):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
-            self.log_message(f"[INFO] Connected to server at {HOST}:{PORT}")
+            self.log_message(f"[INFO] Connected to server at {HOST}:{PORT}", msg_type="info")
 
             if send_packet(self.sock, PACKET_TYPE_USERNAME, self.username):
-                self.log_message(f"[INFO] Username '{self.username}' sent to server.")
+                self.log_message(f"[INFO] Username '{self.username}' sent to server.", msg_type="info")
                 save_connection_info(self.username) 
                 mark_connection_active(self.username) 
                 
@@ -435,23 +453,23 @@ class BattleshipGUI(tk.Tk):
                 
                 self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue)
                 
-                self.log_message("[INFO] Waiting for server response...")
-                self.log_message("[INFO] You may be placed as a player or spectator.")
-                self.log_message("[INFO] Type messages in the input field below and press Enter or Send Chat.")
-                self.log_message("[INFO] Click on opponent's board to fire. Follow prompts for ship placement.")
+                self.log_message("[INFO] Waiting for server response...", msg_type="info")
+                self.log_message("[INFO] You may be placed as a player or spectator.", msg_type="info")
+                self.log_message("[INFO] Type messages in the input field below and press Enter or Send Chat.", msg_type="info")
+                self.log_message("[INFO] Click on opponent's board to fire. Follow prompts for ship placement.", msg_type="info")
 
 
             else:
-                self.log_message("[ERROR] Failed to send username to server.")
+                self.log_message("[ERROR] Failed to send username to server.", msg_type="error")
                 messagebox.showerror("Connection Error", "Failed to send username to server.")
                 if self.sock: self.sock.close()
                 self.destroy()
         except ConnectionRefusedError:
-            self.log_message(f"[ERROR] Could not connect to server at {HOST}:{PORT}. Check if server is running.")
+            self.log_message(f"[ERROR] Could not connect to server at {HOST}:{PORT}. Check if server is running.", msg_type="error")
             messagebox.showerror("Connection Error", f"Could not connect to server at {HOST}:{PORT}.\\nCheck if the server is running.")
             self.destroy()
         except Exception as e:
-            self.log_message(f"[ERROR] Connection error: {e}")
+            self.log_message(f"[ERROR] Connection error: {e}", msg_type="error")
             messagebox.showerror("Connection Error", f"An unexpected connection error occurred: {e}")
             if self.sock: self.sock.close()
             self.destroy()
@@ -494,7 +512,7 @@ class BattleshipGUI(tk.Tk):
                 self.server_message_queue.put(("disconnect_event", None))
                 break
             except socket.timeout: 
-                if self.running: self.log_message("[DEBUG] Socket timeout in receive thread (should be handled by receive_packet).")
+                if self.running: self.log_message("[DEBUG] Socket timeout in receive thread (should be handled by receive_packet).", msg_type="debug")
                 continue 
             except OSError as e: 
                  if self.running: self.server_message_queue.put(("error", f"Socket error: {e}"))
@@ -518,7 +536,7 @@ class BattleshipGUI(tk.Tk):
                     self._handle_packet(packet_type, payload_str)
                 elif msg_type == "error":
                     error_msg = data[0]
-                    self.log_message(f"[ERROR] {error_msg}")
+                    self.log_message(f"[ERROR] {error_msg}", msg_type="error")
                     if "username already in use" in error_msg.lower() or \
                        "expected username packet first" in error_msg.lower() or \
                        "username cannot be empty" in error_msg.lower():
@@ -526,7 +544,7 @@ class BattleshipGUI(tk.Tk):
                         self._shutdown_client() 
                         return 
                 elif msg_type == "disconnect_event":
-                    self.log_message("[INFO] Disconnected from server. Saving connection info if applicable.")
+                    self.log_message("[INFO] Disconnected from server. Saving connection info.", msg_type="info")
                     if self.username: 
                          save_connection_info(self.username)
                     self.input_field.config(state=tk.DISABLED)
@@ -540,7 +558,7 @@ class BattleshipGUI(tk.Tk):
                 elif msg_type == "spectator_mode_on":
                     self.is_spectator = True
                     is_spectator = True
-                    self.log_message("\n[INFO] You are in spectator mode. Observe the game; no moves allowed.")
+                    self.log_message("\n[INFO] You are in spectator mode. Observe the game - no moves allowed.", msg_type="info")
                     self.title(f"Battleship Client - {self.username} (Spectator)")
                     # Set initial labels for spectator boards
                     self.player_board_label.config(text="Player 1's Board (Spectator)")
@@ -559,7 +577,7 @@ class BattleshipGUI(tk.Tk):
         global current_username
 
         if packet_type == PACKET_TYPE_BOARD_UPDATE:
-            self.log_message("\n" + payload_str) 
+            self.log_message("\n" + payload_str, msg_type="game_event")
             self.update_boards_from_string(payload_str)
             self.awaiting_shot_result = False
             self.last_fired_coord = None
@@ -567,58 +585,57 @@ class BattleshipGUI(tk.Tk):
             if self.is_placing_ships and "All ships have been placed" in payload_str :
                  self._toggle_ship_placement_ui(show=False)
         elif packet_type == PACKET_TYPE_GAME_START:
-            self.log_message(f"\n[GAME START] {payload_str}")
+            self.log_message(f"\n[GAME START] {payload_str}", msg_type="game_event")
             self.player_board_label.config(text=f"Your Board ({self.username})")
         elif packet_type == PACKET_TYPE_GAME_END:
-            self.log_message(f"\n[GAME END] {payload_str}")
+            self.log_message(f"\n[GAME END] {payload_str}", msg_type="game_event")
             self._toggle_ship_placement_ui(show=False)
             if self.username: 
                 try:
                     os.remove(get_connection_file(self.username))
-                    self.log_message("[DEBUG] Removed connection file as game ended normally.")
+                    self.log_message("[DEBUG] Removed connection file as game ended normally.", msg_type="debug")
                 except: pass
         elif packet_type == PACKET_TYPE_ERROR:
-            self.log_message(f"\n[ERROR] {payload_str}")
+            self.log_message(f"\n[ERROR] {payload_str}", msg_type="error")
             if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
-                 self.log_message("[ATTENTION] You have timed out! Please respond promptly.")
+                 self.log_message("[ATTENTION] You have timed out! Please respond promptly.", msg_type="error")
             if self.username and ("disconnected" in payload_str.lower() or "connection lost" in payload_str.lower() or "username already in use" in payload_str.lower()):
                 save_connection_info(self.username)
-                self.log_message(f"[INFO] Your username '{self.username}' was saved for potential reconnection.")
+                self.log_message(f"[INFO] Your username '{self.username}' was saved for potential reconnection.", msg_type="info")
             if "Invalid placement" in payload_str:
-                self.log_message("[PLACEMENT ERROR] Server rejected ship placement. Try again.")
+                self.log_message("[PLACEMENT ERROR] Server rejected ship placement. Try again.", msg_type="placement_log")
                 self.selected_coord_label.config(text="Selected Start: Invalid!")
 
 
         elif packet_type == PACKET_TYPE_RECONNECT:
-            self.log_message(f"\n[RECONNECTED] {payload_str}")
+            self.log_message(f"\n[RECONNECTED] {payload_str}", msg_type="info")
             if self.username:
                 mark_connection_active(self.username)
         elif packet_type == PACKET_TYPE_HEARTBEAT:
-            self.log_message("[DEBUG] Received heartbeat, sending ACK")
+            self.log_message("[DEBUG] Received heartbeat, sending ACK", msg_type="debug")
             if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')
         elif packet_type == PACKET_TYPE_CHAT:
             preliminary_result_shown = False
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
-                self.log_message(payload_str)
+                self.log_message(payload_str, msg_type="server_info")
                 self.chat_display.see(tk.END)
                 return
 
-            elif "Place your" in payload_str and "cells)." in payload_str and self.username in payload_str:
+            elif payload_str.startswith("Placing your ") and "(size " in payload_str and payload_str.endswith(")."):
                 self._start_manual_ship_placement(payload_str)
-                self.log_message(payload_str)
                 self.chat_display.see(tk.END)
                 return
             
             elif "All ships have been placed" in payload_str:
-                self.log_message(payload_str)
+                self.log_message(payload_str, msg_type="game_event")
                 if self.is_placing_ships:
                     self._toggle_ship_placement_ui(show=False)
             elif "Invalid placement. Try again" in payload_str:
-                self.log_message(f"[SERVER] {payload_str}")
+                self.log_message(f"[SERVER] {payload_str}", msg_type="placement_log")
                 self.selected_coord_label.config(text="Selected Start: Invalid!")
             elif "already contains a ship" in payload_str:
-                 self.log_message(f"[SERVER] {payload_str}")
+                 self.log_message(f"[SERVER] {payload_str}", msg_type="placement_log")
                  self.selected_coord_label.config(text="Selected Start: Overlap!")
 
             optimistic_update_performed = False
@@ -670,8 +687,8 @@ class BattleshipGUI(tk.Tk):
                         except IndexError:
                             pass
                 if parsed_p1 or parsed_p2:
-                    self.log_message(f"[DEBUG] Spectator names updated: P1='{self.spectator_player1_username}', P2='{self.spectator_player2_username}'")
-                self.log_message(payload_str)
+                    self.log_message(f"[DEBUG] Spectator names updated: P1='{self.spectator_player1_username}', P2='{self.spectator_player2_username}'", msg_type="debug")
+                self.log_message(payload_str, msg_type="game_event")
                 is_spectator_status_msg = True
             
             if not preliminary_result_shown and not is_spectator_status_msg:
@@ -690,26 +707,26 @@ class BattleshipGUI(tk.Tk):
                             if "Spectator@" in sender_info_part:
                                 spectator_name = sender_info_part.split("@")[0].strip() 
                                 formatted_message = f"{spectator_name} (spectator): {message_part}"
-                                self.log_message(f"\n{formatted_message}")
+                                self.log_message(f"{formatted_message}", msg_type="spectator_chat")
                             else:
-                                self.log_message(f"\n{payload_str}") 
+                                self.log_message(f"{payload_str}", msg_type="info") 
                         except IndexError:
-                             self.log_message(f"\n{payload_str}") 
+                             self.log_message(f"{payload_str}", msg_type="info") 
                     else:
-                        self.log_message(payload_str) 
+                        self.log_message(payload_str, msg_type="info") 
 
             if self.awaiting_shot_result and self.username in payload_str and "your turn" in payload_str.lower():
                 self.awaiting_shot_result = False
                 self.last_fired_coord = None
 
         else:
-            self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}")
-            self.log_message(payload_str)
+            self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}", msg_type="debug")
+            self.log_message(payload_str, msg_type="debug")
         
         self.chat_display.see(tk.END)
 
     def update_boards_from_string(self, board_string):
-        self.log_message("[GUI Board Update Triggered]")
+        self.log_message("[GUI Board Update Triggered]", msg_type="debug")
         lines = board_string.strip().split('\n')
 
         if self.is_spectator:
@@ -777,13 +794,13 @@ class BattleshipGUI(tk.Tk):
                                     elif current_parsing_target_spectator == "P2":
                                         player2_grid_data.append(cells)
                                 else:
-                                    self.log_message(f"[DEBUG SPECTATOR] Mismatched cell count for row {row_char}. Got {len(cells)}, expected {self.board_size}. Line: '{line_strip}'")
+                                    self.log_message(f"[DEBUG SPECTATOR] Mismatched cell count for row {row_char}. Got {len(cells)}, expected {self.board_size}. Line: '{line_strip}'", msg_type="debug")
             
             if player1_grid_data or current_parsing_target_spectator == "P1":
-                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 1 grid ({len(player1_grid_data)} rows)")
+                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 1 grid ({len(player1_grid_data)} rows)", msg_type="debug")
                 self.draw_board_on_canvas(self.player_board_canvas, player1_grid_data)
             if player2_grid_data or current_parsing_target_spectator == "P2":
-                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 2 grid ({len(player2_grid_data)} rows)")
+                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 2 grid ({len(player2_grid_data)} rows)", msg_type="debug")
                 self.draw_board_on_canvas(self.opponent_board_canvas, player2_grid_data)
 
         else:
@@ -812,7 +829,7 @@ class BattleshipGUI(tk.Tk):
                         continue
                 
                 # Parse grid data lines
-                if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip : # Looks like "A . . ."
+                if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip :
                     cells = [c for c in line_strip.split(' ') if c]
                     if cells:
                         row_char = cells.pop(0)
@@ -822,13 +839,13 @@ class BattleshipGUI(tk.Tk):
                             elif current_parsing_grid == "opponent":
                                 opponent_grid_data.append(cells)
                         else:
-                            self.log_message(f"[DEBUG PLAYER] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'")
+                            self.log_message(f"[DEBUG PLAYER] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'", msg_type="debug")
             
             if player_grid_data:
-                self.log_message(f"[DEBUG PLAYER] Drawing player grid with data: {player_grid_data}")
+                self.log_message(f"[DEBUG PLAYER] Drawing player grid with data: {player_grid_data}", msg_type="debug")
                 self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
             if opponent_grid_data:
-                self.log_message(f"[DEBUG PLAYER] Drawing opponent grid with data: {opponent_grid_data}")
+                self.log_message(f"[DEBUG PLAYER] Drawing opponent grid with data: {opponent_grid_data}", msg_type="debug")
                 self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
 
 
@@ -900,7 +917,7 @@ class BattleshipGUI(tk.Tk):
         global current_username, is_spectator 
 
         if not self.sock or not self.running:
-            self.log_message("[ERROR] Not connected to server.")
+            self.log_message("[ERROR] Not connected to server.", msg_type="error")
             return
 
         user_input = self.input_field.get().strip()
@@ -910,7 +927,7 @@ class BattleshipGUI(tk.Tk):
         self.input_field.delete(0, tk.END) 
 
         if user_input.lower() == 'quit':
-            self.log_message("[INFO] Quitting the game...")
+            self.log_message("[INFO] Quitting the game...", msg_type="info")
             if self.sock: send_packet(self.sock, PACKET_TYPE_DISCONNECT, "Quit requested by user")
             self._shutdown_client(save_info=False) 
             return
@@ -923,15 +940,15 @@ class BattleshipGUI(tk.Tk):
         if coord_match and not self.is_placing_ships and not self.is_spectator:
             packet_to_send_type = PACKET_TYPE_MOVE
             message_to_send = user_input.upper()
-            self.log_message(f"[ACTION] Sending fire coordinate from input: {message_to_send}")
+            self.log_message(f"[ACTION] Sending fire coordinate from input: {message_to_send}", msg_type="action_log")
         elif user_input.upper() in ["Y", "N", "YES", "NO", "M", "R"] and not self.is_spectator:
             if not self.is_placing_ships or (self.is_placing_ships and user_input.upper() in ["M", "R"]):
                 packet_to_send_type = PACKET_TYPE_MOVE
                 message_to_send = user_input.upper()
-                self.log_message(f"[ACTION] Sending game command from input: {message_to_send}")
+                self.log_message(f"[ACTION] Sending game command from input: {message_to_send}", msg_type="action_log")
 
         if self.is_spectator and packet_to_send_type == PACKET_TYPE_MOVE:
-            self.log_message("[INFO] Spectators cannot make game moves. Your message sent as chat.")
+            self.log_message("[INFO] Spectators cannot make game moves. Your message sent as chat.", msg_type="info")
             packet_to_send_type = PACKET_TYPE_CHAT 
             message_to_send = user_input 
 
@@ -941,26 +958,80 @@ class BattleshipGUI(tk.Tk):
                     display_name = self.username
                     if self.is_spectator:
                         display_name += " (spectator)"
-                    self.log_message(f"\n{display_name}: {user_input}")
+                    self.log_message(f"{display_name}: {user_input}", msg_type="self_chat")
                 elif packet_to_send_type == PACKET_TYPE_MOVE and coord_match:
                     self.last_fired_coord = message_to_send
                     self.awaiting_shot_result = True
             else:
-                self.log_message("[ERROR] Failed to send message to server.")
+                self.log_message("[ERROR] Failed to send message to server.", msg_type="error")
 
-    def log_message(self, message):
+    def log_message(self, message, msg_type=None):
         if self.chat_display.winfo_exists():
             self.chat_display.config(state=tk.NORMAL)
-            self.chat_display.insert(tk.END, message + "\n")
+            
+            now = time.strftime("[%H:%M:%S] ", time.localtime())
+            self.chat_display.insert(tk.END, now, "timestamp")
+
+            sender_name = None
+            text_content = message
+            base_text_tag = "other_msg_text"
+            sender_tag = None
+
+            if msg_type == "self_chat":
+                parts = message.split(":", 1)
+                sender_name = parts[0].strip()
+                text_content = parts[1].strip() if len(parts) > 1 else ""
+                sender_tag = "self_msg_sender"
+                base_text_tag = "self_msg_text"
+            elif msg_type == "other_chat":
+                parts = message.split(":", 1)
+                sender_name = parts[0].strip()
+                text_content = parts[1].strip() if len(parts) > 1 else ""
+                sender_tag = "other_msg_sender"
+                base_text_tag = "other_msg_text"
+            elif msg_type == "spectator_chat":
+                parts = message.split(":", 1)
+                sender_name = parts[0].strip()
+                text_content = parts[1].strip() if len(parts) > 1 else ""
+                sender_tag = "spectator_msg_sender"
+                base_text_tag = "spectator_msg_text"
+            elif msg_type == "server_chat":
+                sender_name = "Server"
+                text_content = message
+                sender_tag = "server_info_sender"
+                base_text_tag = "server_info_text"
+            elif msg_type == "error":
+                sender_name = "System"
+                sender_tag = "error_msg_sender"
+                base_text_tag = "error_msg_text"
+            elif msg_type == "info":
+                sender_name = "System"
+                sender_tag = "server_info_sender"
+                base_text_tag = "server_info_text"
+            elif msg_type == "game_event":
+                base_text_tag = "game_event_text"
+            elif msg_type == "action_log":
+                base_text_tag = "action_log_text"
+            elif msg_type == "placement_log":
+                 base_text_tag = "placement_log_text"
+            elif msg_type == "debug":
+                base_text_tag = "debug_log_text"
+
+
+            if sender_name and sender_tag:
+                self.chat_display.insert(tk.END, f"{sender_name}: ", sender_tag)
+            
+            self.chat_display.insert(tk.END, text_content + "\n", base_text_tag)
+            
             self.chat_display.config(state=tk.DISABLED)
             self.chat_display.see(tk.END)
         else:
-            print(f"[LOG (Chat Display N/A)]: {message}")
+            print(f"[LOG (Chat Display N/A) Type: {msg_type}]: {message}")
 
 
     def _on_closing(self):
         if messagebox.askokcancel("Quit", "Do you want to quit Battleship?"):
-            self.log_message("[INFO] Quit by closing window.")
+            self.log_message("[INFO] Quit by closing window.", msg_type="info")
             if self.sock:
                  send_packet(self.sock, PACKET_TYPE_DISCONNECT, "Client closed window")
             self._shutdown_client(save_info=True) 
@@ -979,30 +1050,30 @@ class BattleshipGUI(tk.Tk):
                     self.sock.close()
                 except OSError: pass
 
-        if self.winfo_exists(): # Check if window still exists before destroying
+        if self.winfo_exists():
             self.destroy()
 
     def _apply_preliminary_shot_result(self, coord_str, cell_char):
         if not coord_str: return
-        self.log_message(f"[PRELIMINARY_UI] Trying to update {coord_str} to {cell_char} on opponent board.")
+        self.log_message(f"[GUI] Trying to update {coord_str} to {cell_char} on opponent board.", msg_type="debug")
         try:
             row_char_upper = coord_str[0].upper()
             if not ('A' <= row_char_upper <= 'J'):
-                self.log_message(f"[PRELIMINARY_UI FAIL] Invalid row char: {coord_str[0]}")
+                self.log_message(f"[GUI FAIL] Invalid row char: {coord_str[0]}", msg_type="debug")
                 return
 
             row = ord(row_char_upper) - ord('A')
             col_str = coord_str[1:]
             if not col_str.isdigit():
-                self.log_message(f"[PRELIMINARY_UI FAIL] Invalid col string: {col_str}")
+                self.log_message(f"[GUI FAIL] Invalid col string: {col_str}", msg_type="debug")
                 return
             col = int(col_str) - 1
 
             if not (0 <= row < self.board_size and 0 <= col < self.board_size):
-                self.log_message(f"[PRELIMINARY_UI FAIL] Coord out of bounds: r{row} c{col}")
+                self.log_message(f"[GUI FAIL] Coord out of bounds: r{row} c{col}", msg_type="debug")
                 return
         except Exception as e:
-            self.log_message(f"[PRELIMINARY_UI FAIL] Error parsing coord '{coord_str}': {e}")
+            self.log_message(f"[GUI FAIL] Error parsing coord '{coord_str}': {e}", msg_type="debug")
             return
 
         canvas = self.opponent_board_canvas
@@ -1020,7 +1091,6 @@ class BattleshipGUI(tk.Tk):
         center_x = x0_rect + self.cell_size / 2
         center_y = y0_rect + self.cell_size / 2
 
-        # Redraw the cell background and base dot
         canvas.create_rectangle(x0_rect, y0_rect, x1_rect, y1_rect, fill=water_bg_color, outline=water_bg_color, tags="cells")
         canvas.create_oval(center_x - base_dot_radius, center_y - base_dot_radius,
                             center_x + base_dot_radius, center_y + base_dot_radius,
@@ -1033,12 +1103,12 @@ class BattleshipGUI(tk.Tk):
             canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
                                 x1_rect - hit_x_padding, y0_rect + hit_x_padding,
                                 fill='#DC143C', width=3, tags="cells")
-            self.log_message(f"[PRELIMINARY_UI DRAW] Drew 'X' at {coord_str} (r{row},c{col})")
+            self.log_message(f"[GUI DRAW] Drew 'X' at {coord_str} (r{row},c{col})", msg_type="debug")
         elif cell_char == 'o':
             canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
                                 center_x + miss_dot_radius, center_y + miss_dot_radius,
                                 fill='white', outline='white', tags="cells")
-            self.log_message(f"[PRELIMINARY_UI DRAW] Drew 'o' at {coord_str} (r{row},c{col})")
+            self.log_message(f"[GUI DRAW] Drew 'o' at {coord_str} (r{row},c{col})", msg_type="debug")
 
 
 # Dialog for Reconnection
@@ -1089,7 +1159,7 @@ if __name__ == "__main__":
         app.mainloop()
     except KeyboardInterrupt:
         if hasattr(app, 'running') and app.running : 
-             if hasattr(app, 'log_message'): app.log_message("[INFO] Client exiting due to keyboard interrupt.")
+             if hasattr(app, 'log_message'): app.log_message("[INFO] Client exiting due to keyboard interrupt.", msg_type="info")
              if hasattr(app, '_shutdown_client'): app._shutdown_client(save_info=True)
     finally:
         pass

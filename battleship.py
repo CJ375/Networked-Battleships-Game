@@ -595,51 +595,41 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     # Show current board state
                     send_board_to_player(player_wfile, player_board)
                     send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
-                    send_to_player(player_wfile, "Enter starting coordinate (e.g. A1):")
-                    coord_str = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
+                    send_to_player(player_wfile, "Enter starting coordinate and orientation (e.g. A1 H or B2 V):")
+                    combined_input = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
                     
                     # Check for timeout or quit command
-                    if coord_str is None:
-                        send_to_player(player_wfile, f"Timeout waiting for coordinate. {ship_name} will be placed randomly.")
-                        # Place this ship randomly and continue with next ship
+                    if combined_input is None:
+                        send_to_player(player_wfile, f"Timeout waiting for input. {ship_name} will be placed randomly.")
                         randomly_place_single_ship(player_board, ship_name, ship_size)
                         send_to_player(player_wfile, f"{ship_name} placed randomly.")
                         placed = True
                         continue
-                    elif coord_str.lower() == 'quit':
-                        return False
-                    
-                    send_to_player(player_wfile, "Orientation? Enter 'H' (horizontal) or 'V' (vertical):")
-                    orientation_str = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
-                    
-                    # Check for timeout or quit command
-                    if orientation_str is None:
-                        send_to_player(player_wfile, f"Timeout waiting for orientation. {ship_name} will be placed randomly.")
-                        # Place this ship randomly and continue with next ship
-                        randomly_place_single_ship(player_board, ship_name, ship_size)
-                        send_to_player(player_wfile, f"{ship_name} placed randomly.")
-                        placed = True
-                        continue
-                    elif orientation_str.lower() == 'quit':
+                    elif combined_input.lower() == 'quit':
                         return False
                     
                     try:
-                        row, col = parse_coordinate(coord_str)
-                        
-                        # Normalize the orientation string
-                        orientation_str = orientation_str.upper()[0] if orientation_str else ""
-                        
-                        # Convert orientation_str to 0 (horizontal) or 1 (vertical)
-                        if orientation_str == 'H':
-                            orientation = 0
-                        elif orientation_str == 'V':
-                            orientation = 1
-                        else:
-                            send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
+                        parts = combined_input.strip().upper().split()
+                        if len(parts) != 2:
+                            send_to_player(player_wfile, "Invalid format. Expected coordinate and orientation (e.g., A1 H).")
                             continue
                         
-                        if player_board.can_place_ship(row, col, ship_size, orientation):
-                            occupied_positions = player_board.do_place_ship(row, col, ship_size, orientation)
+                        coord_str = parts[0]
+                        orientation_char = parts[1]
+
+                        row, col = parse_coordinate(coord_str) # parse_coordinate only takes coord_str
+                        
+                        # Convert orientation_char to 0 (horizontal) or 1 (vertical)
+                        if orientation_char == 'H':
+                            orientation_enum = 0
+                        elif orientation_char == 'V':
+                            orientation_enum = 1
+                        else:
+                            send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V' after the coordinate.")
+                            continue
+                        
+                        if player_board.can_place_ship(row, col, ship_size, orientation_enum):
+                            occupied_positions = player_board.do_place_ship(row, col, ship_size, orientation_enum)
                             player_board.placed_ships.append({
                                 'name': ship_name,
                                 'positions': occupied_positions
@@ -647,7 +637,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                             send_to_player(player_wfile, f"{ship_name} placed successfully!")
                             placed = True
                         else:
-                            send_to_player(player_wfile, f"Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
+                            send_to_player(player_wfile, f"Cannot place {ship_name} at {coord_str} (orientation={orientation_char}). Try again.")
                     
                     except ValueError as e:
                         send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
