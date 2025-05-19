@@ -98,22 +98,26 @@ def verify_packet(packet_bytes):
     If is_valid is False, payload will be None.
     """
     if len(packet_bytes) < HEADER_SIZE:
+        print(f"[DEBUG] Packet too short: {len(packet_bytes)} < {HEADER_SIZE}")
         return (False, None, None)
     
     header_bytes = packet_bytes[:HEADER_SIZE]
     try:
         magic, seq, ptype, dlen, received_checksum = decode_header(header_bytes)
-    except:
+    except Exception as e:
+        print(f"[DEBUG] Failed to decode header in verify_packet: {e}")
         return (False, None, None)
     
     # Verify magic number
     if magic != MAGIC_NUMBER:
+        print(f"[DEBUG] Invalid magic number: {hex(magic)} != {hex(MAGIC_NUMBER)}")
         return (False, None, None)
     
     payload = packet_bytes[HEADER_SIZE:]
     
     # Verify payload length
     if len(payload) != dlen:
+        print(f"[DEBUG] Payload length mismatch: {len(payload)} != {dlen}")
         return (False, None, None)
     
     # Calculate checksum of header (excluding checksum field) + payload
@@ -121,6 +125,8 @@ def verify_packet(packet_bytes):
     
     # Verify checksum
     is_valid = (calculated_checksum == received_checksum)
+    if not is_valid:
+        print(f"[DEBUG] Checksum mismatch: {hex(calculated_checksum)} != {hex(received_checksum)}")
     
     decoded_header = (magic, seq, ptype, dlen)
     return (is_valid, decoded_header, payload if is_valid else None)
@@ -142,13 +148,16 @@ def receive_packet(sock, timeout=None):
         while len(header_bytes) < HEADER_SIZE:
             chunk = sock.recv(HEADER_SIZE - len(header_bytes))
             if not chunk:
+                print("[DEBUG] Connection closed while receiving header")
                 return (False, None, None)  # Connection closed
             header_bytes += chunk
             
         # Decode header to get payload length
         try:
             magic, seq, ptype, dlen, checksum = decode_header(header_bytes)
-        except:
+            print(f"[DEBUG] Received header: magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}, len={dlen}")
+        except Exception as e:
+            print(f"[DEBUG] Failed to decode header: {e}")
             return (False, None, None)
             
         # Receive payload
@@ -156,12 +165,19 @@ def receive_packet(sock, timeout=None):
         while len(payload) < dlen:
             chunk = sock.recv(min(4096, dlen - len(payload)))
             if not chunk:
+                print("[DEBUG] Connection closed while receiving payload")
                 return (False, None, None)  # Connection closed
             payload += chunk
             
         # Verify complete packet
-        return verify_packet(header_bytes + payload)
+        is_valid, decoded_header, verified_payload = verify_packet(header_bytes + payload)
+        if not is_valid:
+            print(f"[DEBUG] Packet verification failed: magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}")
+        return (is_valid, decoded_header, verified_payload)
         
+    except Exception as e:
+        print(f"[DEBUG] Error in receive_packet: {e}")
+        return (False, None, None)
     finally:
         # Restore original timeout
         if timeout is not None:
@@ -173,12 +189,14 @@ def send_packet(sock, packet_type, payload, max_retries=3):
     Returns True if the packet was sent successfully, False otherwise.
     """
     packet = create_packet(packet_type, payload)
+    print(f"[DEBUG] Sending packet: type={get_packet_type_name(packet_type)}, len={len(payload)}")
     
     for attempt in range(max_retries):
         try:
             sock.sendall(packet)
             return True
         except (socket.error, BrokenPipeError) as e:
+            print(f"[DEBUG] Send attempt {attempt + 1} failed: {e}")
             if attempt == max_retries - 1:
                 return False
             time.sleep(0.1 * (attempt + 1))  # Backoff before retry

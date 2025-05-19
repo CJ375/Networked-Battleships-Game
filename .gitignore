@@ -10,5 +10,6 @@
 *.pyzw
 *.json
 __pycache__/battleship.cpython-312.pyc
+testgame.py
 testrun.py
 .DS_Store

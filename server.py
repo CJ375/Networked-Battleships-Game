@@ -16,6 +16,7 @@ import time
 import queue
 import select
 import random
+import json
 from battleship import run_two_player_game
 from protocol import (
     receive_packet, send_packet, 
@@ -121,17 +122,18 @@ def handle_player_disconnect(player_conn, player_name):
     Handle a player disconnection during gameplay.
     Marks the player as disconnected and starts the reconnection window.
     """
-    # Add player to disconnected players with a timestamp
-    with disconnected_players_lock:
-        disconnected_players[player_name] = {
-            'disconnect_time': time.time(),
-            # Note: opponent and board will be added by the game session handler
-        }
-    
-    # Remove from active usernames
+    # Clean up active usernames
     with active_usernames_lock:
         if player_name in active_usernames:
             del active_usernames[player_name]
+            print(f"[INFO] {player_name} removed from active usernames")
+    
+    # THEN add to disconnected players
+    with disconnected_players_lock:
+        disconnected_players[player_name] = {
+            'disconnect_time': time.time(),
+        }
+        print(f"[INFO] {player_name} marked as disconnected. Reconnection window: {RECONNECT_TIMEOUT} seconds")
     
     try:
         send_packet(player_conn, PACKET_TYPE_ERROR, f"Connection lost. You have been disconnected from the game.")
@@ -142,8 +144,6 @@ def handle_player_disconnect(player_conn, player_name):
         player_conn.close()
     except:
         pass
-        
-    print(f"[INFO] {player_name} disconnected during gameplay. Reconnection window: {RECONNECT_TIMEOUT} seconds")
 
 def ask_play_again(player_conn):
     """
@@ -169,6 +169,8 @@ def handle_waiting_player(conn, addr, username):
     """
     global waiting_players, waiting_players_lock, game_in_progress
     
+    print(f"[INFO] {username} entered waiting lobby.")
+    
     try:
         # Add player to waiting queue
         with waiting_players_lock:
@@ -191,6 +193,7 @@ def handle_waiting_player(conn, addr, username):
                     magic, seq, packet_type, data_len = header
                     
                     if packet_type == PACKET_TYPE_CHAT and payload_str.lower() == 'quit':
+                        print(f"[INFO] {username} has chosen to quit the waiting lobby.")
                         with waiting_players_lock:
                             # Remove player from queue if they're still in
                             temp_queue = queue.Queue()
@@ -205,11 +208,13 @@ def handle_waiting_player(conn, addr, username):
                         with active_usernames_lock:
                             if username in active_usernames:
                                 del active_usernames[username]
+                                print(f"[INFO] Removed {username} from active usernames after quitting waiting lobby.")
                                 
                         return
                     
                     elif packet_type == PACKET_TYPE_DISCONNECT:
                         # Handle player disconnect
+                        print(f"[INFO] {username} has disconnected from the waiting lobby.")
                         with waiting_players_lock:
                             # Remove player from queue
                             temp_queue = queue.Queue()
@@ -223,6 +228,7 @@ def handle_waiting_player(conn, addr, username):
                         with active_usernames_lock:
                             if username in active_usernames:
                                 del active_usernames[username]
+                                print(f"[INFO] Removed {username} from active usernames after disconnection from waiting lobby.")
                                 
                         return
                 
@@ -243,6 +249,7 @@ def handle_waiting_player(conn, addr, username):
                             waiting_players.put(player)  # Put all players back in queue
                         
                         if position == 0:  # Player is no longer in queue
+                            print(f"[INFO] {username} is no longer in waiting queue.")
                             return
                     
                 # Only send position update occasionally to reduce traffic
@@ -257,7 +264,7 @@ def handle_waiting_player(conn, addr, username):
                 time.sleep(0.5)
                 
             except (ConnectionResetError, BrokenPipeError):
-                print(f"[INFO] Waiting player disconnected from {addr}")
+                print(f"[INFO] {username} disconnected from waiting lobby at {addr}")
                 with waiting_players_lock:
                     # Remove disconnected player from queue
                     temp_queue = queue.Queue()
@@ -271,75 +278,107 @@ def handle_waiting_player(conn, addr, username):
                 with active_usernames_lock:
                     if username in active_usernames:
                         del active_usernames[username]
+                        print(f"[INFO] Removed {username} from active usernames after connection error in waiting lobby.")
                         
                 return
             except Exception as e:
-                print(f"[ERROR] Error handling waiting player: {e}")
+                print(f"[ERROR] Error handling waiting player {username}: {e}")
+                
+                # Clean up active username
+                with active_usernames_lock:
+                    if username in active_usernames:
+                        del active_usernames[username]
+                        print(f"[INFO] Removed {username} from active usernames due to error in waiting lobby.")
+                        
                 return
                 
     except Exception as e:
-        print(f"[ERROR] Error setting up waiting player: {e}")
+        print(f"[ERROR] Error setting up waiting player {username}: {e}")
         
         # Remove from active usernames
         with active_usernames_lock:
             if username in active_usernames:
                 del active_usernames[username]
+                print(f"[INFO] Removed {username} from active usernames due to setup error in waiting lobby.")
                 
         try:
             conn.close()
         except:
             pass
 
-def handle_spectator(conn, addr):
-    """
-    Handle a spectator connection.
-    Sends game updates to the spectator and manages their connection.
-    """
+def handle_spectator(conn, addr, game):
+    """Handle a spectator connection."""
+    print(f"[DEBUG] New spectator connection from {addr}")
     try:
-        # Add spectator to the list
-        with spectators_lock:
-            current_game_spectators.append(conn)
+        # Send initial spectator packet
+        spectator_data = {
+            'board_size': game.board_size,
+            'player1': game.player1,
+            'player2': game.player2,
+            'current_turn': game.current_turn,
+            'game_state': game.game_state,
+            'last_move': game.last_move,
+            'last_move_result': game.last_move_result
+        }
+        print(f"[DEBUG] Sending initial spectator data: {spectator_data}")
+        if not send_packet(conn, PACKET_TYPE_BOARD_UPDATE, json.dumps(spectator_data).encode()):
+            print("[DEBUG] Failed to send initial spectator data")
+            return
+
+        # Set a longer timeout for spectators
+        conn.settimeout(30)  # 30 second timeout
         
-        # Send welcome message
-        send_packet(conn, PACKET_TYPE_CHAT, "\nYou are now spectating the current game.")
-        send_packet(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate.")
-        send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating.")
+        last_heartbeat = time.time()
+        heartbeat_interval = 15  # Send heartbeat every 15 seconds
         
-        # Keep connection alive while game is in progress
-        while game_in_progress:
+        while True:
             try:
-                # Check for spectator input using protocol
-                valid, header, payload = receive_packet(conn, timeout=1)
+                current_time = time.time()
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    print("[DEBUG] Sending spectator heartbeat")
+                    if not send_packet(conn, PACKET_TYPE_HEARTBEAT, b''):
+                        print("[DEBUG] Failed to send heartbeat")
+                        break
+                    last_heartbeat = current_time
                 
-                if valid and payload:
-                    payload_str = payload.decode() if isinstance(payload, bytes) else payload
-                    magic, seq, packet_type, data_len = header
+                # Receive any data from spectator
+                is_valid, header, payload = receive_packet(conn, timeout=1.0)
+                if not is_valid:
+                    print("[DEBUG] Received invalid packet from spectator")
+                    continue
                     
-                    if packet_type == PACKET_TYPE_CHAT and payload_str.lower() == 'quit':
-                        break
-                    if packet_type == PACKET_TYPE_DISCONNECT:
-                        break
+                if header is None:  # No data received
+                    continue
+                    
+                magic, seq, ptype, dlen = header
+                print(f"[DEBUG] Received packet from spectator: type={get_packet_type_name(ptype)}")
                 
-                # Send heartbeat to keep connection alive
-                send_packet(conn, PACKET_TYPE_HEARTBEAT, "")
-                
-            except (ConnectionResetError, BrokenPipeError):
-                break
+                if ptype == PACKET_TYPE_HEARTBEAT:
+                    print("[DEBUG] Received heartbeat from spectator")
+                    # Send ACK for heartbeat
+                    if not send_packet(conn, PACKET_TYPE_ACK, b''):
+                        print("[DEBUG] Failed to send heartbeat ACK")
+                        break
+                elif ptype == PACKET_TYPE_ACK:
+                    print("[DEBUG] Received ACK from spectator")
+                    # Just acknowledge receipt
+                    continue
+                else:
+                    print(f"[DEBUG] Unexpected packet type from spectator: {get_packet_type_name(ptype)}")
+                    continue
+                    
+            except socket.timeout:
+                # This is expected due to our timeout
+                continue
             except Exception as e:
-                print(f"[ERROR] Error handling spectator: {e}")
+                print(f"[DEBUG] Error handling spectator: {e}")
                 break
                 
     except Exception as e:
-        print(f"[ERROR] Error setting up spectator: {e}")
+        print(f"[DEBUG] Fatal error in spectator handler: {e}")
     finally:
-        # Remove spectator from list and close connection
-        with spectators_lock:
-            if conn in current_game_spectators:
-                current_game_spectators.remove(conn)
-        try:
-            conn.close()
-        except:
-            pass
+        print(f"[DEBUG] Closing spectator connection from {addr}")
+        conn.close()
 
 def notify_spectators(message):
     """
@@ -611,16 +650,20 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
     finally:
         # Clean up player data
         with active_usernames_lock:
-            if player1_username in active_usernames:
+            if player1_username in active_usernames and active_usernames[player1_username] == player1_conn:
                 del active_usernames[player1_username]
-            if player2_username in active_usernames:
+                print(f"[INFO] Cleaned up {player1_username} from active usernames")
+            if player2_username in active_usernames and active_usernames[player2_username] == player2_conn:
                 del active_usernames[player2_username]
+                print(f"[INFO] Cleaned up {player2_username} from active usernames")
         
         with disconnected_players_lock:
             if player1_username in disconnected_players:
                 del disconnected_players[player1_username]
+                print(f"[INFO] Cleaned up {player1_username} from disconnected players")
             if player2_username in disconnected_players:
                 del disconnected_players[player2_username]
+                print(f"[INFO] Cleaned up {player2_username} from disconnected players")
         
         # Ensure connections are closed properly
         try:
@@ -696,12 +739,20 @@ def run_game_server():
                             continue
                         else:
                             # Failed to reconnect, close connection
+                            try:
+                                send_packet(conn, PACKET_TYPE_ERROR, "Failed to reconnect to game session.")
+                            except:
+                                pass
                             conn.close()
                             continue
                     else:
                         # Username in use
                         print(f"[WARNING] Username {username} is already in use. Closing connection.")
-                        send_packet(conn, PACKET_TYPE_ERROR, message)
+                        try:
+                            send_packet(conn, PACKET_TYPE_ERROR, message)
+                            time.sleep(0.1)
+                        except:
+                            pass
                         conn.close()
                         continue
                 
@@ -715,7 +766,7 @@ def run_game_server():
                         # Game in progress, add as spectator
                         print(f"[INFO] Game in progress. {username}@{addr} will be a spectator.")
                         threading.Thread(target=handle_spectator,
-                                      args=(conn, addr), 
+                                      args=(conn, addr, game), 
                                       daemon=True).start()
                     else:
                         # No game in progress, check waiting queue
@@ -764,32 +815,44 @@ def check_username_available(username):
     - (False, "error message") if username is already in use
     - (False, "disconnected") if username belongs to a disconnected player
     """
-    # First check active usernames
-    with active_usernames_lock:
-        if username in active_usernames:
-            return (False, "Username already in use by another player.")
+    print(f"[DEBUG] Checking username availability for '{username}'")
     
-    # Then check disconnected players
+    # First check if username is in disconnected players dictionary
+    disconnected_status = False
     with disconnected_players_lock:
         if username in disconnected_players:
+            print(f"[DEBUG] Found '{username}' in disconnected_players")
             disconnect_time = disconnected_players[username]['disconnect_time']
             elapsed = time.time() - disconnect_time
             
             if elapsed <= RECONNECT_TIMEOUT:
+                print(f"[DEBUG] '{username}' is within reconnection window ({elapsed:.1f}s < {RECONNECT_TIMEOUT}s)")
                 return (False, "disconnected")  # Special case for reconnection
             else:
-                # Cleanup expired entry
+                print(f"[DEBUG] '{username}' reconnection window expired, cleaning up")
                 del disconnected_players[username]
     
+    # Next check if username is already in active usernames
+    with active_usernames_lock:
+        if username in active_usernames:
+            print(f"[DEBUG] '{username}' is already in active_usernames")
+            return (False, "Username already in use by another player.")
+        else:
+            print(f"[DEBUG] '{username}' is not in active_usernames")
+    
+    print(f"[DEBUG] '{username}' is available")
     return (True, None)
 
 def handle_reconnection(conn, addr, username):
     """
     Handle a player reconnection attempt.
     """
+    print(f"[DEBUG] Handling reconnection attempt for {username} from {addr}")
+    
     with disconnected_players_lock:
         # If the player is not in the disconnected list, can't reconnect
         if username not in disconnected_players:
+            print(f"[WARNING] {username} tried to reconnect but was not found in disconnected players")
             send_packet(conn, PACKET_TYPE_ERROR, "No active game found for reconnection.")
             return False
             
@@ -798,23 +861,26 @@ def handle_reconnection(conn, addr, username):
         current_time = time.time()
         
         # Check if reconnection window has expired
-        if current_time - disconnect_time > RECONNECT_TIMEOUT:
+        elapsed = current_time - disconnect_time
+        if elapsed > RECONNECT_TIMEOUT:
+            print(f"[WARNING] {username} reconnection window expired ({elapsed:.1f} seconds > {RECONNECT_TIMEOUT}s)")
             send_packet(conn, PACKET_TYPE_ERROR, f"Reconnection window expired ({RECONNECT_TIMEOUT} seconds).")
             del disconnected_players[username]
             return False
             
-        # Reconnection is valid
-        print(f"[INFO] {username} successfully reconnected to their game.")
+        # Reconnection is valid - remove from disconnected_players
+        print(f"[INFO] {username} successfully reconnected to their game after {elapsed:.1f}s")
+        del disconnected_players[username]
         
         # Add to active usernames
         with active_usernames_lock:
+            if username in active_usernames:
+                print(f"[WARNING] {username} was already in active_usernames during reconnection!")
             active_usernames[username] = conn
+            print(f"[DEBUG] Added {username} back to active_usernames")
             
         # Send welcome back message
         send_packet(conn, PACKET_TYPE_RECONNECT, "Successfully reconnected to your game.")
-        
-        # Remove from disconnected players
-        del disconnected_players[username]
         
         return True
 
