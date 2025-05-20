@@ -4,6 +4,8 @@ protocol.py
 Implements a custom packet protocol for Battleship game communication.
 The protocol provides secure communication with the packet structure,
 serialization, checksum verification, and AES encryption.
+
+Default configuration provides verbose debug prints - flag can be set to False.
 """
 
 import struct

@@ -1,3 +1,11 @@
+"""
+protocol_test.py
+
+Runs a statistical demonstration of the protocol's checksum mechanism.
+
+Default configuration does not provide verbose debug prints - flag can be set to True.
+"""
+
 import random
 import time
 import sys
@@ -28,10 +36,10 @@ def run_checksum_statistical_demo(num_packets_to_test=1000, intentional_corrupti
         'total_tested': 0,
         'total_intentionally_corrupted': 0,
         'total_uncorrupted_sent': 0,
-        'correctly_detected_corruption': 0,  # Intentionally corrupted, verify_packet said False
-        'missed_corruption': 0,              # Intentionally corrupted, verify_packet said True
-        'correctly_passed_valid': 0,         # Not intentionally corrupted, verify_packet said True
-        'falsely_detected_corruption': 0     # Not intentionally corrupted, verify_packet said False
+        'correctly_detected_corruption': 0,  # Intentionally corrupted, verify_packet says False
+        'missed_corruption': 0,              # Intentionally corrupted, verify_packet says True
+        'correctly_passed_valid': 0,         # Not intentionally corrupted, verify_packet says True
+        'falsely_detected_corruption': 0     # Not intentionally corrupted, verify_packet says False
     }
 
     for i in range(num_packets_to_test):
@@ -43,17 +51,14 @@ def run_checksum_statistical_demo(num_packets_to_test=1000, intentional_corrupti
         was_intentionally_corrupted = False
 
         if random.random() < intentional_corruption_chance:
-            # Corrupt the packet using the function from protocol.py
-            # The existing corrupt_packet takes a corruption_rate for bit flips.
 
-            # Let's define a simple deterministic corrupter for this test to ensure a change
             temp_packet_list = list(original_packet)
             if len(temp_packet_list) > 0:
-                # Flip one bit in the first byte (excluding cases where it might not change the byte)
-                # Corrupt a byte in the payload part
+                # Flip one bit in the first byte
+                # Corrupt a byte in the payload
                 corruption_index = random.randint(0, len(temp_packet_list) -1)
 
-                if len(temp_packet_list) > 16 : # Ensure packet is correctly sized
+                if len(temp_packet_list) > 16 :
                     idx_to_corrupt = random.randint(0, 12)
                     if len(temp_packet_list) > 33 and random.random() < 0.5 :
                          idx_to_corrupt = random.randint(33, len(temp_packet_list) - 1)
@@ -70,7 +75,7 @@ def run_checksum_statistical_demo(num_packets_to_test=1000, intentional_corrupti
         else:
             stats['total_uncorrupted_sent'] += 1
 
-        # Verify the packet (original/corrupted)
+        # Verify the packet
         is_valid_according_to_protocol, _, _ = verify_packet(packet_to_verify)
 
         if was_intentionally_corrupted:
@@ -78,7 +83,7 @@ def run_checksum_statistical_demo(num_packets_to_test=1000, intentional_corrupti
                 stats['correctly_detected_corruption'] += 1
             else:
                 stats['missed_corruption'] += 1
-        else: # Packet was not intentionally corrupted
+        else:
             if is_valid_according_to_protocol:
                 stats['correctly_passed_valid'] += 1
             else:
@@ -106,7 +111,6 @@ if __name__ == "__main__":
     output_filename = "checksum_test_results.txt"
     original_stdout = sys.stdout
 
-    # Silence verbose debug prints from the protocol module for this test run
     protocol.PROTOCOL_VERBOSE_DEBUG = False
 
     print(f"Running tests and saving results to: {output_filename}")

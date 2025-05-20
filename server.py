@@ -23,7 +23,7 @@ from protocol import (
     PACKET_TYPE_ERROR, PACKET_TYPE_ACK, get_packet_type_name
 )
 
-# Server configuration
+# Server configuration and timeouts
 HOST = '127.0.0.1'
 PORT = 5001
 CONNECTION_TIMEOUT = 60  # seconds to wait for a connection
@@ -36,17 +36,17 @@ game_in_progress = False
 game_lock = threading.Lock()
 waiting_players = queue.Queue()
 waiting_players_lock = threading.Lock()
-current_game_spectators = []  # List of spectator connections
+current_game_spectators = []
 spectators_lock = threading.Lock()
 
-# Player tracking and reconnection management
-active_usernames = {}  # username -> connection
+# Player tracking and connection management
+active_usernames = {}
 active_usernames_lock = threading.Lock()
-disconnected_players = {}  # username -> {opponent, board, disconnect_time}
+disconnected_players = {}
 disconnected_players_lock = threading.Lock()
-player_connections = {}  # username -> connection socket
+player_connections = {}
 player_connections_lock = threading.Lock()
-current_games = {}  # game_id -> {player1_username, player2_username, started_time}
+current_games = {}
 current_games_lock = threading.Lock()
 
 # Game state representation
