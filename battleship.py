@@ -505,7 +505,8 @@ def recv_from_player_with_timeout(player_rfile, timeout_secs, player_name_for_er
 
 
 def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile, 
-                        notify_spectators_callback,
+                        notify_spectators_board_callback, # For actual board data updates
+                        notify_spectators_event_callback, # For chat-like game event strings
                         player1_username="Player 1", player2_username="Player 2",
                         initial_player1_board_state=None, 
                         initial_player2_board_state=None,
@@ -721,7 +722,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             player2_board = Board.deserialize(initial_player2_board_state)
             send_to_player(player1_wfile, "Game resumed.")
             send_to_player(player2_wfile, "Game resumed.")
-            notify_spectators_callback("Game has been resumed.")
+            notify_spectators_event_callback("Game has been resumed.")
             if not player1_board.placed_ships or not player2_board.placed_ships :
                  print("[GAME LOGIC WARNING] Resumed game but one or both players appear to have no ships placed.")
         except Exception as e:
@@ -733,7 +734,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         send_to_player(player1_wfile, f"Welcome to Battleship! You are {player1_username}. Waiting for {player2_username} to be ready...")
         send_to_player(player2_wfile, f"Welcome to Battleship! You are {player2_username}. Game is starting with {player1_username}.")
         
-        notify_spectators_callback(f"New game starting between {player1_username} and {player2_username}.")
+        notify_spectators_event_callback(f"New game starting between {player1_username} and {player2_username}.")
         
         send_to_player(player1_wfile, "Starting ship placement phase...")
         send_to_player(player2_wfile, f"Waiting for {player1_username} to place ships...")
@@ -785,7 +786,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
 
         send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
         send_to_player(player2_wfile, "All ships have been placed. Starting the game!")
-        notify_spectators_callback("Ship placement complete. The game begins!")
+        notify_spectators_event_callback("Ship placement complete. The game begins!")
     
     current_player_name_for_turn = initial_current_player_name if is_resumed_game else player1_username
     consecutive_timeouts = 0
@@ -829,7 +830,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             
             send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
 
-            send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
+            send_board_to_spectators(player1_board, player2_board, notify_spectators_board_callback)
 
             send_to_player(current_wfile, f"Enter coordinate to fire at (e.g. B5): (You have {MOVE_TIMEOUT} seconds)")
 
@@ -844,7 +845,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             if guess.lower() == 'quit':
                 send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
                 send_to_player(other_wfile, f"{actual_current_player_name} has quit. You win by default!")
-                notify_spectators_callback(f"{actual_current_player_name} has quit. {opponent_name} wins.")
+                notify_spectators_event_callback(f"{actual_current_player_name} has quit. {opponent_name} wins.")
                 return None 
 
             try:
@@ -859,29 +860,29 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
 
                         send_to_player(current_wfile, f"HIT! You sank {opponent_name}'s {sunk_name}!")
                         send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and sank your {sunk_name}!")
-                        notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and sank {opponent_name}'s {sunk_name}!")
+                        notify_spectators_event_callback(f"{actual_current_player_name} fired at {guess} and sank {opponent_name}'s {sunk_name}!")
                     else:
                         send_to_player(current_wfile, "HIT!")
                         send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and scored a hit!")
-                        notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and scored a hit!")
+                        notify_spectators_event_callback(f"{actual_current_player_name} fired at {guess} and scored a hit!")
 
                     send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
                     send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
-                    send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
+                    send_board_to_spectators(player1_board, player2_board, notify_spectators_board_callback)
 
                     if opponent_board_obj.all_ships_sunk():
                         send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
                         send_to_player(other_wfile, f"Game over! {actual_current_player_name} has sunk all your ships.")
-                        notify_spectators_callback(f"Game over! {actual_current_player_name} has won by sinking all of {opponent_name}'s ships!")
+                        notify_spectators_event_callback(f"Game over! {actual_current_player_name} has won by sinking all of {opponent_name}'s ships!")
                         return None 
                 elif result == 'miss':
                     send_to_player(current_wfile, "MISS!")
                     send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and missed!")
-                    notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and missed!")
+                    notify_spectators_event_callback(f"{actual_current_player_name} fired at {guess} and missed!")
 
                     send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
                     send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
-                    send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
+                    send_board_to_spectators(player1_board, player2_board, notify_spectators_board_callback)
                 elif result == 'already_shot':
                     send_to_player(current_wfile, "You've already fired at that location. Try again.")
                     continue  

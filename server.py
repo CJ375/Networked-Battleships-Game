@@ -462,6 +462,23 @@ def notify_spectators(message):
             except:
                 current_game_spectators.remove(conn)
 
+def send_event_to_spectators(event_message):
+    """Sends a CHAT message to all connected spectators for game events."""
+    with spectators_lock:
+        for conn in list(current_game_spectators):
+            try:
+                # Prefixing for clarity on the client side, though client can format as it sees fit
+                send_packet(conn, PACKET_TYPE_CHAT, f"[GAME EVENT] {event_message}")
+            except Exception as e:
+                print(f"[INFO] Error sending event to spectator {conn.getpeername() if hasattr(conn, 'getpeername') else 'unknown_spec'}: {e}. Removing spectator.")
+                try:
+                    current_game_spectators.remove(conn)
+                    conn.close()
+                except ValueError: # Already removed
+                    pass
+                except Exception: # Error during close
+                    pass
+
 def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, player1_username, player2_username, game_id):
     """Manages a game session between two players, handling gameplay, disconnections, and rematches."""
     global game_in_progress, current_game_spectators, disconnected_players, current_game, active_usernames
@@ -535,6 +552,7 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                 run_two_player_game(
                     player1_adapter, player1_adapter, player2_adapter, player2_adapter,
                     notify_spectators,
+                    send_event_to_spectators,
                     player1_username=player1_username, player2_username=player2_username,
                     initial_player1_board_state=current_p1_board_state,
                     initial_player2_board_state=current_p2_board_state,
@@ -930,23 +948,25 @@ def main():
 
 def check_username_available(username):
     """Checks if a username is available for a new connection or eligible for reconnection."""
-    print(f"[DEBUG] Checking username availability for '{username}'")
-    
+    with active_usernames_lock:
+        print(f"[DEBUG]   active_usernames: {list(active_usernames.keys())}")
+    with disconnected_players_lock:
+        print(f"[DEBUG]   disconnected_players: {list(disconnected_players.keys())}")
+
     with disconnected_players_lock:
         if username in disconnected_players:
-            disconnect_time = disconnected_players[username]['disconnect_time']
-            elapsed = time.time() - disconnect_time
+            elapsed = time.time() - disconnected_players[username]['disconnect_time']
             if elapsed <= RECONNECT_TIMEOUT:
-                print(f"[DEBUG] '{username}' is in disconnected_players (elapsed {elapsed:.1f}s). Allowing reconnect.")
+                print(f"[DEBUG] '{username}' reconnect within {elapsed:.1f}s → treating as disconnected.")
                 return (False, "disconnected")
             else:
-                print(f"[DEBUG] '{username}' reconnection window expired ({elapsed:.1f}s), dropping record.")
+                print(f"[DEBUG] '{username}' reconnection window expired ({elapsed:.1f}s).  Dropping record.")
                 del disconnected_players[username]
 
     with active_usernames_lock:
         if username in active_usernames:
-            print(f"[DEBUG] Username '{username}' still in active_usernames. Rejecting as in use.")
-            return (False, "Username already in use by another player.") 
+            print(f"[DEBUG] '{username}' is still active -> rejecting as in use.")
+            return (False, "Username already in use by another player.")
 
     print(f"[DEBUG] '{username}' is available for a new session.")
     return (True, None)
