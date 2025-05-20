@@ -28,6 +28,15 @@ HOST = '127.0.0.1'
 PORT = 5001
 GUI_UPDATE_INTERVAL = 100
 
+# Standard ship definitions
+SHIPS = [
+    ("Carrier", 5),
+    ("Battleship", 4),
+    ("Cruiser", 3),
+    ("Submarine", 3),
+    ("Destroyer", 2)
+]
+
 # Global state
 current_username = ""
 is_spectator = False
@@ -209,6 +218,7 @@ class BattleshipGUI(tk.Tk):
         self.awaiting_shot_result = False
         self.sunk_ships_on_my_board_coords = []
         self.sunk_ships_on_opponent_board_coords = []
+        self.opponent_sunk_ship_names = set()
 
         # Board configuration
         self.board_size = 10
@@ -269,6 +279,16 @@ class BattleshipGUI(tk.Tk):
         self.opponent_board_canvas.pack(pady=5)
         self.opponent_board_canvas.bind("<Button-1>", self._on_opponent_board_click)
         
+        # Opponent Progress UI
+        self.opponent_progress_frame = tk.LabelFrame(self.game_area_frame, text="Opponent's Fleet Status", pady=5)
+
+        self.opponent_ship_status_labels = {}
+        for ship_name, ship_length in SHIPS:
+            label_text = f"{ship_name} ({ship_length}): Active"
+            label = tk.Label(self.opponent_progress_frame, text=label_text)
+            label.pack(anchor="w")
+            self.opponent_ship_status_labels[ship_name] = label
+
         # Ship Placement UI
         self.placement_frame = tk.Frame(self.game_area_frame, pady=10)
         self.placement_prompt_label = tk.Label(self.placement_frame, text="Ship Placement Options:")
@@ -379,6 +399,7 @@ class BattleshipGUI(tk.Tk):
                         child.pack_forget()
                         break
                 self.confirm_placement_button.pack_forget()
+                self.opponent_progress_frame.pack_forget()
             else:
                 self.manual_random_frame.pack_forget()
                 self.current_ship_label.pack()
@@ -390,8 +411,12 @@ class BattleshipGUI(tk.Tk):
                         orientation_frame_found = True
                         break
                 self.confirm_placement_button.pack()
+                self.opponent_progress_frame.pack_forget()
         else:
             self.placement_frame.pack_forget()
+            if not self.is_spectator:
+                self.opponent_progress_frame.pack(side=tk.TOP, fill=tk.X, pady=5, after=self.boards_frame)
+
         self.is_placing_ships = show and not show_mr_choice
 
     def draw_grid_lines(self, canvas):
@@ -744,6 +769,8 @@ class BattleshipGUI(tk.Tk):
                 self.log_command(payload_str, msg_type="game_event")
                 if self.is_placing_ships:
                     self._toggle_ship_placement_ui(show=False)
+                if not self.is_spectator:
+                    self.opponent_progress_frame.pack(side=tk.TOP, fill=tk.X, pady=5, after=self.boards_frame)
                 is_game_flow_message = True
 
             elif "Invalid placement. Try again" in payload_str:
@@ -1000,6 +1027,8 @@ class BattleshipGUI(tk.Tk):
                     current_parsing_grid = "player"
                     self.player_board_label.config(text=f"Your Board ({self.username})")
                     current_grid_data = []
+                    current_sunk_list_target = self.sunk_ships_on_my_board_coords
+                    self.opponent_sunk_ship_names.clear()
                     continue
                 elif "Opponent's Grid:" in line_strip:
                     current_parsing_grid = "opponent"
@@ -1010,26 +1039,30 @@ class BattleshipGUI(tk.Tk):
                     continue
                 
                 sunk_info_key = "SUNK_SHIPS_INFO:"
-                if line_strip.startswith(sunk_info_key) and current_sunk_list_target is not None:
+                if line_strip.startswith(sunk_info_key):
                     data_part = line_strip[len(sunk_info_key):]
                     if data_part:
                         ship_entries = data_part.split(';')
                         for entry in ship_entries:
                             if ':' not in entry: continue
                             name_part, coords_data_part = entry.split(':', 1)
-                            coord_pair_strs = coords_data_part.split('_')
-                            ship_cell_coords = set()
-                            for cp_str in coord_pair_strs:
-                                if ',' not in cp_str: continue
-                                try:
-                                    r_str, c_str = cp_str.split(',')
-                                    r, c = int(r_str), int(c_str)
-                                    if 0 <= r < self.board_size and 0 <= c < self.board_size:
-                                        ship_cell_coords.add((r, c))
-                                except ValueError:
-                                    self.log_command(f"[DEBUG] Failed to parse sunk ship r,c pair: {cp_str}", "debug")
-                            if ship_cell_coords:
-                                current_sunk_list_target.append(ship_cell_coords)
+                            if current_parsing_grid == "opponent" or (self.is_spectator and current_parsing_target_spectator == "P2"):
+                                self.opponent_sunk_ship_names.add(name_part)
+                            
+                            if current_sunk_list_target is not None:
+                                coord_pair_strs = coords_data_part.split('_')
+                                ship_cell_coords = set()
+                                for cp_str in coord_pair_strs:
+                                    if ',' not in cp_str: continue
+                                    try:
+                                        r_str, c_str = cp_str.split(',')
+                                        r, c = int(r_str), int(c_str)
+                                        if 0 <= r < self.board_size and 0 <= c < self.board_size:
+                                            ship_cell_coords.add((r, c))
+                                    except ValueError:
+                                        self.log_command(f"[DEBUG] Failed to parse sunk ship r,c pair: {cp_str}", "debug")
+                                if ship_cell_coords:
+                                    current_sunk_list_target.append(ship_cell_coords)
                     continue
 
                 if line_strip and line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
@@ -1059,6 +1092,22 @@ class BattleshipGUI(tk.Tk):
                     self.draw_board_on_canvas(self.player_board_canvas, current_grid_data)
                 elif current_parsing_grid == "opponent" and current_grid_data:
                     self.draw_board_on_canvas(self.opponent_board_canvas, current_grid_data)
+
+        if not self.is_spectator:
+            self._update_opponent_progress_ui()
+
+    def _update_opponent_progress_ui(self):
+        """Updates the labels in the opponent progress frame based on sunk ship names."""
+        if not hasattr(self, 'opponent_ship_status_labels'):
+            return
+
+        for ship_name, ship_length in SHIPS:
+            status_label = self.opponent_ship_status_labels.get(ship_name)
+            if status_label:
+                if ship_name in self.opponent_sunk_ship_names:
+                    status_label.config(text=f"{ship_name} ({ship_length}): SUNK!", fg="red")
+                else:
+                    status_label.config(text=f"{ship_name} ({ship_length}): Active", fg="green")
 
     def draw_board_on_canvas(self, canvas, grid_data):
         """Draws the game board on the specified canvas using the provided grid data."""
