@@ -108,6 +108,10 @@ def load_connection_info(username):
 
 def check_any_recent_connections():
     recent_usernames = []
+    stale_files_to_remove = [] # Makes sure old connection files are removed
+    current_time = time.time()
+    reconnect_timeout_period = 60
+
     try:
         for filename in os.listdir(battleship_dir):
             if filename.startswith(".battleship_connection_") and filename.endswith(".json"):
@@ -118,13 +122,35 @@ def check_any_recent_connections():
                         username = data.get('username')
                         timestamp = data.get('timestamp', 0)
                         disconnected = data.get('disconnected', False)
-                        elapsed = time.time() - timestamp
-                        if elapsed <= 60 and username and disconnected:
+                        elapsed = current_time - timestamp
+
+                        if elapsed > reconnect_timeout_period:
+                            stale_files_to_remove.append(connection_file)
+                            if username:
+                                print(f"[INFO] Marked stale connection file for '{username}' for removal (age: {elapsed:.0f}s).")
+                            else:
+                                print(f"[INFO] Marked stale connection file {filename} for removal (age: {elapsed:.0f}s).")
+                            continue
+
+                        if username and disconnected:
                             recent_usernames.append((username, elapsed))
-                except:
+                except json.JSONDecodeError:
+                    print(f"[WARNING] Corrupted connection file (JSONDecodeError): {connection_file}. Marking for removal.")
+                    stale_files_to_remove.append(connection_file)
+                except Exception as e_read:
+                    print(f"[WARNING] Could not read or process connection file {connection_file}: {e_read}. It may be removed if deemed stale by other means or left if not.")
                     continue
-    except Exception as e:
+    except Exception as e_list:
+        print(f"[WARNING] Could not list directory for reconnection files: {e_list}")
         pass
+
+    for file_to_remove in stale_files_to_remove:
+        try:
+            os.remove(file_to_remove)
+            print(f"[INFO] Successfully removed stale/corrupted connection file: {file_to_remove}")
+        except Exception as e_remove:
+            print(f"[WARNING] Failed to remove stale/corrupted connection file {file_to_remove}: {e_remove}")
+
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
 
@@ -261,7 +287,7 @@ class BattleshipGUI(tk.Tk):
         self.input_field = tk.Entry(input_frame)
         self.input_field.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.input_field.bind("<Return>", self._send_input)
-        self.send_button = tk.Button(input_frame, text="Send Chat", command=self._send_input)
+        self.send_button = tk.Button(input_frame, text="Send Chat or Command", command=self._send_input)
         self.send_button.pack(side=tk.RIGHT)
 
     def _toggle_ship_placement_ui(self, show=False, show_mr_choice=False):
