@@ -377,6 +377,11 @@ def handle_spectator(conn, addr, game):
         if not _send_spectator_message(conn, PACKET_TYPE_CHAT, game_state_message, "initial game state"):
             return
 
+        if isinstance(game, RealGame) and game.player1 and game.player2 and game.player1 != "Waiting for players":
+            player_info_msg = f"SPECTATOR_PLAYER_NAMES:P1={game.player1},P2={game.player2}"
+            if not _send_spectator_message(conn, PACKET_TYPE_CHAT, player_info_msg, "player names"):
+                print(f"[WARNING] Failed to send SPECTATOR_PLAYER_NAMES to {spectator_username}")
+
         with spectators_lock:
             current_game_spectators.append(conn)
             print(f"[DEBUG] Added spectator to list. Total spectators: {len(current_game_spectators)}")
@@ -388,9 +393,6 @@ def handle_spectator(conn, addr, game):
         last_heartbeat = time.time()
         heartbeat_interval = 15
         
-        last_status_update = time.time()
-        status_update_interval = 10
-        
         while True:
             try:
                 current_time = time.time()
@@ -399,20 +401,6 @@ def handle_spectator(conn, addr, game):
                     if not _send_spectator_message(conn, PACKET_TYPE_HEARTBEAT, b'', "heartbeat send"):
                         break
                     last_heartbeat = current_time
-                
-                if current_time - last_status_update >= status_update_interval:
-                    status_message = f"\nGame Status Update:\n"
-                    status_message += f"Game State: {game.game_state}\n"
-                    if game.current_turn:
-                        status_message += f"Current Turn: {game.current_turn}\n"
-                    if game.last_move:
-                        status_message += f"Last Move: {game.last_move}\n"
-                    if game.last_move_result:
-                        status_message += f"Result: {game.last_move_result}\n"
-                        
-                    if not _send_spectator_message(conn, PACKET_TYPE_CHAT, status_message, "status update"):
-                        break
-                    last_status_update = current_time
                 
                 is_valid, header, payload = receive_packet(conn, timeout=1.0)
                 if not is_valid and header is not None:
@@ -866,6 +854,12 @@ def run_game_server():
                                 game_id_for_session = f"{player1_username}_vs_{username}_{int(time.time())}"
                                 current_game = RealGame(player1_username, username, game_id_for_session)
                                 
+                                player_info_update_msg = f"SPECTATOR_PLAYER_NAMES:P1={player1_username},P2={username}"
+                                with spectators_lock:
+                                    for spec_conn in current_game_spectators:
+                                        if spec_conn != player1_conn and spec_conn != conn:
+                                            _send_spectator_message(spec_conn, PACKET_TYPE_CHAT, player_info_update_msg, "update player names for new game")
+
                                 threading.Thread(target=handle_game_session, 
                                               args=(player1_conn, conn, player1_addr, addr, player1_username, username, game_id_for_session),
                                               daemon=True).start()
@@ -938,27 +932,21 @@ def check_username_available(username):
     """Checks if a username is available for a new connection or eligible for reconnection."""
     print(f"[DEBUG] Checking username availability for '{username}'")
     
-    with active_usernames_lock:
-        if username in active_usernames:
-            existing_conn = active_usernames.get(username)
-            if not existing_conn:
-                print(f"[DEBUG] Anomaly: '{username}' key was in active_usernames but value was None. Treating as available.")
-            else:
-                print(f"[DEBUG] Username '{username}' found in active_usernames. Verifying existing connection status.")
-                return (False, "Username already in use by another player.")
-
     with disconnected_players_lock:
         if username in disconnected_players:
-            player_data = disconnected_players[username]
-            disconnect_time = player_data['disconnect_time']
+            disconnect_time = disconnected_players[username]['disconnect_time']
             elapsed = time.time() - disconnect_time
-            
             if elapsed <= RECONNECT_TIMEOUT:
-                print(f"[DEBUG] '{username}' is in disconnected_players and within reconnection window ({elapsed:.1f}s). Eligible for reconnect.")
-                return (False, "disconnected") 
+                print(f"[DEBUG] '{username}' is in disconnected_players (elapsed {elapsed:.1f}s). Allowing reconnect.")
+                return (False, "disconnected")
             else:
-                print(f"[DEBUG] '{username}' was in disconnected_players, but window expired ({elapsed:.1f}s). Removing.")
+                print(f"[DEBUG] '{username}' reconnection window expired ({elapsed:.1f}s), dropping record.")
                 del disconnected_players[username]
+
+    with active_usernames_lock:
+        if username in active_usernames:
+            print(f"[DEBUG] Username '{username}' still in active_usernames. Rejecting as in use.")
+            return (False, "Username already in use by another player.") 
 
     print(f"[DEBUG] '{username}' is available for a new session.")
     return (True, None)

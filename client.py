@@ -765,6 +765,31 @@ class BattleshipGUI(tk.Tk):
                 self.log_command(payload_str, msg_type="placement_log")
                 is_game_flow_message = True
                 return
+            elif self.is_spectator and payload_str.startswith("SPECTATOR_PLAYER_NAMES:"):
+                try:
+                    p_info = payload_str.replace("SPECTATOR_PLAYER_NAMES:", "").strip()
+                    parts = p_info.split(',')
+                    p1_name = None
+                    p2_name = None
+                    for part in parts:
+                        if part.startswith("P1="):
+                            p1_name = part.split("=", 1)[1]
+                        elif part.startswith("P2="):
+                            p2_name = part.split("=", 1)[1]
+                    
+                    if p1_name and p2_name:
+                        self.spectator_player1_username = p1_name
+                        self.spectator_player2_username = p2_name
+                        self.log_command(f"[INFO] Spectating game between {p1_name} and {p2_name}.", msg_type="info")
+                        if hasattr(self, 'player_board_label') and self.player_board_label:
+                            self.player_board_label.config(text=f"{self.spectator_player1_username}'s Board")
+                        if hasattr(self, 'opponent_board_name_label') and self.opponent_board_name_label:
+                            self.opponent_board_name_label.config(text=f"{self.spectator_player2_username}'s Board")
+                    else:
+                        self.log_command(f"[DEBUG] Could not parse P1/P2 names from: {payload_str}", msg_type="debug")
+                except Exception as e_parse:
+                    self.log_command(f"[ERROR] Parsing spectator player names: {e_parse}", msg_type="error")
+                return
             elif "All ships have been placed" in payload_str:
                 self.log_command(payload_str, msg_type="game_event")
                 if self.is_placing_ships:
