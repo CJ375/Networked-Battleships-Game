@@ -143,31 +143,62 @@ class ProtocolAdapter:
         self.grid_mode = False
         
     def readline(self):
-        """Reads a line from the buffer or waits for a new packet."""
-        if self.buffer:
-            return self.buffer.pop(0)
-            
-        valid, header, payload = receive_packet(self.conn, timeout=MOVE_TIMEOUT)
-        if not valid or not payload:
-            raise ConnectionResetError("Failed to receive packet")
-            
-        payload_str = payload.decode() if isinstance(payload, bytes) else payload
-        magic, seq, packet_type, data_len = header
-        
-        self.last_packet_type = packet_type
-        
-        if packet_type == PACKET_TYPE_MOVE:
-            return payload_str + "\n"
-        elif packet_type == PACKET_TYPE_CHAT:
-            if payload_str.upper() in ['M', 'R', 'H', 'V', 'Y', 'N', 'YES', 'NO']:
-                return payload_str + "\n"
+        """Reads a line for game logic from incoming packets,
+           handling other packet types like CHAT appropriately.
+           This method should only return when a game-relevant input is received.
+        """
+
+        while True:
+            valid, header, payload = receive_packet(self.conn, timeout=MOVE_TIMEOUT)
+
+            if not valid or payload is None:
+                log_message = f"readline for {self.username}: "
+                if not valid and header is None and payload is None:
+                    log_message += "Receive_packet indicated disconnect/timeout."
+                else:
+                    log_message += f"Failed to receive valid packet or payload. Valid: {valid}, Header: {header is not None}, Payload: {payload is not None}"
+                print(f"[ADAPTER INFO] {log_message}")
+                raise ConnectionResetError(f"Communication error or disconnect for {self.username}")
+
+            payload_str = payload.decode() if isinstance(payload, bytes) else payload
+            _magic, _seq, packet_type, _data_len = header
+            self.last_packet_type = packet_type
+
+            print(f"[ADAPTER DEBUG] {self.username} - Received Packet Type: {get_packet_type_name(packet_type)}, Payload: '{payload_str.strip()}'")
+
+            if packet_type == PACKET_TYPE_MOVE:
+                print(f"[ADAPTER INFO] {self.username} - Returning MOVE: '{payload_str.strip()}' to game logic.")
+                return payload_str.strip()
+
+            elif packet_type == PACKET_TYPE_CHAT:
+                stripped_payload = payload_str.strip().upper()
+                game_command_chats = ['Y', 'N', 'YES', 'NO', 'QUIT']
+
+                if stripped_payload in game_command_chats:
+                    print(f"[ADAPTER INFO] {self.username} - CHAT interpreted as game command: '{stripped_payload}'. Returning to game logic.")
+                    return stripped_payload
+                else:
+                    print(f"[ADAPTER INFO] {self.username} - Broadcasting CHAT: '{payload_str.strip()}' and continuing to listen for game input.")
+                    broadcast_chat_message(self.username, payload_str.strip())
+                    continue
+
+            elif packet_type == PACKET_TYPE_DISCONNECT:
+                print(f"[ADAPTER INFO] {self.username} - Received DISCONNECT signal during readline.")
+                raise ConnectionResetError(f"Player {self.username} sent disconnect signal")
+
+            elif packet_type == PACKET_TYPE_HEARTBEAT:
+                print(f"[ADAPTER WARNING] {self.username} - Received unexpected HEARTBEAT. Sending ACK and continuing.")
+                if not send_packet(self.conn, PACKET_TYPE_ACK, b""):
+                    raise ConnectionResetError(f"Failed to send ACK for unexpected HEARTBEAT from {self.username}")
+                continue
+
+            elif packet_type == PACKET_TYPE_ACK:
+                print(f"[ADAPTER WARNING] {self.username} - Received unexpected ACK. Ignoring and continuing.")
+                continue
+
             else:
-                broadcast_chat_message(self.username, payload_str)
-                return "\n"
-        elif packet_type == PACKET_TYPE_DISCONNECT:
-            raise ConnectionResetError("Player disconnected")
-        else:
-            return "\n"
+                print(f"[ADAPTER WARNING] {self.username} - Received unhandled packet type {get_packet_type_name(packet_type)} in readline. Content: '{payload_str.strip()}'. Ignoring and continuing to listen for game input.")
+                continue
             
     def write(self, msg):
         """Writes a message to be sent as a packet."""

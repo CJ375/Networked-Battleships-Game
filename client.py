@@ -730,12 +730,12 @@ class BattleshipGUI(tk.Tk):
             is_game_flow_message = False
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
-                self.system_info_display.see(tk.END)
+                self.log_command(payload_str, msg_type="info")
                 is_game_flow_message = True
                 return
             elif payload_str.startswith("Placing your ") and "(size " in payload_str and payload_str.endswith(")."):
                 self._start_manual_ship_placement(payload_str)
-                self.system_info_display.see(tk.END)
+                self.log_command(payload_str, msg_type="placement_log")
                 is_game_flow_message = True
                 return
             elif "All ships have been placed" in payload_str:
@@ -764,15 +764,13 @@ class BattleshipGUI(tk.Tk):
                     
                     if "Spectator@" in sender_info_part:
                         spectator_name = sender_info_part.split("@", 1)[1].strip()
-                        formatted_message = f"{spectator_name} (spectator): {message_part}"
-                        self.log_message(formatted_message, msg_type="spectator_chat")
+                        self.log_message(f"{spectator_name} (spectator): {message_part}", msg_type="spectator_chat")
                     else:
                         player_name = sender_info_part if sender_info_part else self.username
-                        formatted_message = f"{player_name}: {message_part}"
                         if player_name == self.username:
-                            self.log_message(formatted_message, msg_type="self_chat")
+                            pass
                         else:
-                            self.log_message(formatted_message, msg_type="other_chat")
+                            self.log_message(f"{player_name}: {message_part}", msg_type="other_chat")
                 except Exception as e:
                     self.log_command(f"Error parsing chat: {payload_str} - {e}", msg_type="error")
                 return
@@ -1132,7 +1130,7 @@ class BattleshipGUI(tk.Tk):
                 display_name = self.username
                 if self.is_spectator:
                     display_name += " (spectator)"
-                self.log_command(f"{display_name}: {user_input}", msg_type="self_chat")
+                self.log_message(f"{display_name}: {user_input}", msg_type="self_chat")
             else:
                 self.log_command("[ERROR] Failed to send chat message to server.", msg_type="error")
 
@@ -1158,38 +1156,63 @@ class BattleshipGUI(tk.Tk):
             self.log_command("[ERROR] Failed to send command to the server.", msg_type="error")
 
     def log_message(self, message, msg_type=None):
-        """Logs a chat message to the chat display (only for chat messages)."""
-        if msg_type in ["self_chat", "other_chat", "spectator_chat"]:
-            if self.chat_display.winfo_exists():
-                self.chat_display.config(state=tk.NORMAL)
-                now = time.strftime("[%H:%M:%S] ", time.localtime())
-                self.chat_display.insert(tk.END, now)
-                self.chat_display.insert(tk.END, message + "\n")
-                self.chat_display.config(state=tk.DISABLED)
-                self.chat_display.see(tk.END)
-        else:
-            self.log_command(message, msg_type=msg_type)
+        """Logs a CHAT message to the CHAT display panel.
+           Formats the message with sender info if applicable based on msg_type.
+        """
+        if not self.chat_display.winfo_exists():
+            return
+
+        self.chat_display.config(state=tk.NORMAL)
+        now = time.strftime("[%H:%M:%S] ", time.localtime())
+        self.chat_display.insert(tk.END, now, "timestamp")
+
+        display_text = message
+        text_tags = ()
+
+        if msg_type == "self_chat":
+            text_tags = ("self_msg_text",)
+        elif msg_type == "other_chat":
+            text_tags = ("other_msg_text",)
+        elif msg_type == "spectator_chat":
+            text_tags = ("spectator_msg_text",)
+
+        self.chat_display.insert(tk.END, display_text + "\n", text_tags)
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
 
     def log_command(self, message, msg_type=None):
-        """Logs a command or system message to the system info display."""
-        if self.system_info_display.winfo_exists():
-            self.system_info_display.config(state=tk.NORMAL)
-            now = time.strftime("[%H:%M:%S] ", time.localtime())
-            self.system_info_display.insert(tk.END, now, "timestamp")
-            config = MSG_TYPE_CONFIG.get(msg_type, MSG_TYPE_CONFIG[None])
-            sender_name = config.get("sender_name_override")
-            text_content = message
-            sender_tag = config.get("sender_tag")
-            base_text_tag = config.get("text_tag", MSG_TYPE_CONFIG[None]["text_tag"])
-            if config.get("split_message", False) and not sender_name:
-                parts = message.split(":", 1)
-                sender_name = parts[0].strip()
-                text_content = parts[1].strip() if len(parts) > 1 else ""
-            if sender_name and sender_tag:
-                self.system_info_display.insert(tk.END, f"{sender_name}: ", sender_tag)
-            self.system_info_display.insert(tk.END, text_content + "\n", base_text_tag)
-            self.system_info_display.config(state=tk.DISABLED)
-            self.system_info_display.see(tk.END)
+        """Logs a command, system, or game event message to the SYSTEM INFO display panel.
+           Uses MSG_TYPE_CONFIG for styling if applicable.
+        """
+        if not self.system_info_display.winfo_exists():
+            return
+            
+        self.system_info_display.config(state=tk.NORMAL)
+        now = time.strftime("[%H:%M:%S] ", time.localtime())
+        self.system_info_display.insert(tk.END, now, "timestamp")
+
+        config = MSG_TYPE_CONFIG.get(msg_type, MSG_TYPE_CONFIG.get(None))
+        sender_name_override = config.get("sender_name_override")
+        text_content = message
+        sender_tag = config.get("sender_tag")
+        base_text_tag = config.get("text_tag", MSG_TYPE_CONFIG.get(None)["text_tag"])
+
+        if config.get("split_message", False) and not sender_name_override and ":" in text_content:
+            try:
+                parts = text_content.split(":", 1)
+                parsed_sender = parts[0].strip()
+                parsed_content = parts[1].strip() if len(parts) > 1 else ""
+                if parsed_sender and parsed_content:
+                    self.system_info_display.insert(tk.END, f"{parsed_sender}: ", sender_tag if sender_tag else base_text_tag)
+                    text_content = parsed_content
+            except Exception:
+                pass
+        elif sender_name_override and sender_tag:
+            self.system_info_display.insert(tk.END, f"{sender_name_override}: ", sender_tag)
+        
+        self.system_info_display.insert(tk.END, text_content + "\n", base_text_tag)
+        self.system_info_display.config(state=tk.DISABLED)
+        self.system_info_display.see(tk.END)
 
     def _on_closing(self):
         """Handles the window closing event."""
