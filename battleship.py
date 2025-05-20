@@ -22,9 +22,9 @@ SHIPS = [
     ("Destroyer", 2)
 ]
 
-MOVE_TIMEOUT = 30  # time limit a player has to make a move
+MOVE_TIMEOUT = 30  # make a move time limit
 
-# Custom exception for any player disconnects
+# Custom exception for player disconnections
 class PlayerDisconnectedError(Exception):
     def __init__(self, player_name, game_state):
         self.player_name = player_name
@@ -55,9 +55,8 @@ class Board:
         self.size = size
         # '.' for empty water
         self.hidden_grid = [['.' for _ in range(size)] for _ in range(size)]
-        # display_grid is what the player or an observer sees (no 'S')
         self.display_grid = [['.' for _ in range(size)] for _ in range(size)]
-        self.placed_ships = []  # e.g. [{'name': 'Destroyer', 'positions': {(r, c), ...}}, ...]
+        self.placed_ships = []
         self.spectators = []
 
     def place_ships_randomly(self, ships=SHIPS):

@@ -1,15 +1,9 @@
 """
 client.py
 
-Connects to a Battleship server for a two-player game.
-This client handles both single-player and two-player modes:
-- Receives and displays game boards and messages from the server
-- Sends user commands for ship placement and firing coordinates
-- Runs in a threaded mode to handle asynchronous server messages
-- Supports playing multiple games in succession without disconnecting
-- Provides feedback about move timeouts
-- Uses custom protocol
-- Supports reconnection to an interrupted game
+This module implements a GUI client for the Battleship game, handling network communication,
+game state management, and UI interactions. It supports ship placement,
+gameplay, chat functionality, and reconnection.
 """
 
 import socket
@@ -29,23 +23,28 @@ from protocol import (
     PACKET_TYPE_ERROR, PACKET_TYPE_ACK, get_packet_type_name
 )
 
+# Network configuration
 HOST = '127.0.0.1'
 PORT = 5001
 GUI_UPDATE_INTERVAL = 100
 
+# Global state
 current_username = ""
 is_spectator = False
 
+# Reconnection data management
 project_root = os.getcwd() 
 battleship_dir = os.path.join(project_root, ".reconnection_data")
 os.makedirs(battleship_dir, exist_ok=True)
 
 def get_connection_file(username):
+    """Returns the path to the connection file for a given username."""
     if not username:
         return None
     return os.path.join(battleship_dir, f".battleship_connection_{username}.json")
 
 def save_connection_info(username):
+    """Saves connection information for a username when disconnected."""
     if not username:
         return
     connection_file = get_connection_file(username)
@@ -60,6 +59,7 @@ def save_connection_info(username):
         pass
 
 def mark_connection_active(username):
+    """Marks a connection as active by updating its timestamp and disconnected status."""
     if not username:
         return
     connection_file = get_connection_file(username)
@@ -68,7 +68,6 @@ def mark_connection_active(username):
             with open(connection_file, 'w') as f:
                 json.dump({'username': username, 'timestamp': time.time(), 'disconnected': False}, f)
         else:
-            # File exists - rwx
             with open(connection_file, 'r+') as f:
                 try:
                     data = json.load(f)
@@ -84,8 +83,8 @@ def mark_connection_active(username):
     except Exception as e:
         pass
 
-
 def load_connection_info(username):
+    """Loads connection information for a username and checks if reconnection is possible."""
     if not username:
         return False
     connection_file = get_connection_file(username)
@@ -106,8 +105,9 @@ def load_connection_info(username):
     return False
 
 def check_any_recent_connections():
+    """Checks for any recent disconnections that can be reconnected to."""
     recent_usernames = []
-    stale_files_to_remove = [] # Makes sure old connection files are removed
+    stale_files_to_remove = []
     current_time = time.time()
     reconnect_timeout_period = 60
 
@@ -145,6 +145,7 @@ def check_any_recent_connections():
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
 
+# Message type configuration for chat display
 MSG_TYPE_CONFIG = {
     "self_chat": {
         "split_message": True,
@@ -184,11 +185,14 @@ MSG_TYPE_CONFIG = {
 }
 
 class BattleshipGUI(tk.Tk):
+    """Main GUI class for the Battleship game client."""
+    
     def __init__(self):
         super().__init__()
         self.title("Battleship Client")
         self.geometry("1100x750")
 
+        # Network and game state
         self.sock = None
         self.server_message_queue = Queue()
         self.network_thread = None
@@ -196,23 +200,25 @@ class BattleshipGUI(tk.Tk):
         self.is_spectator = False
         self.running = True
 
+        # Spectator state
         self.spectator_player1_username = None
         self.spectator_player2_username = None
 
+        # Game state
         self.last_fired_coord = None
         self.awaiting_shot_result = False
 
-        # Board and cell dimensions
+        # Board configuration
         self.board_size = 10
         self.cell_size = 30
 
         # Ship placement state
         self.is_placing_ships = False
-        self.ships_to_place_list = [] # List of tuples (ship_name, ship_length)
+        self.ships_to_place_list = []
         self.current_ship_to_place_idx = 0
         self.current_ship_name = ""
         self.current_ship_length = 0
-        self.selected_placement_coord = None # e.g., "A1"
+        self.selected_placement_coord = None
         self.placement_orientation_var = tk.StringVar(value="H")
 
         self._setup_ui()
@@ -221,6 +227,7 @@ class BattleshipGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _setup_ui(self):
+        """Initializes the main UI components including game boards and chat area."""
         main_frame = tk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -261,7 +268,6 @@ class BattleshipGUI(tk.Tk):
         
         # Ship Placement UI
         self.placement_frame = tk.Frame(self.game_area_frame, pady=10)
-
         self.placement_prompt_label = tk.Label(self.placement_frame, text="Ship Placement Options:")
         self.placement_prompt_label.pack()
         
@@ -285,14 +291,26 @@ class BattleshipGUI(tk.Tk):
         self.draw_grid_lines(self.player_board_canvas)
         self.draw_grid_lines(self.opponent_board_canvas)
         
+        # Chat/log area setup
         self.chat_area_frame = tk.Frame(self.paned_window, relief=tk.SUNKEN, borderwidth=1)
         self.paned_window.add(self.chat_area_frame, minsize=250)
-
-        # Chat/Log display
         self.chat_display = scrolledtext.ScrolledText(self.chat_area_frame, height=10, state=tk.DISABLED, wrap=tk.WORD)
         self.chat_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Message styling
+        # Message styling configuration
+        self._configure_chat_tags()
+
+        # Input field and send button
+        input_frame = tk.Frame(self.chat_area_frame)
+        input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
+        self.input_field = tk.Entry(input_frame)
+        self.input_field.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.input_field.bind("<Return>", self._send_input)
+        self.send_button = tk.Button(input_frame, text="Send Chat or Command", command=self._send_input)
+        self.send_button.pack(side=tk.RIGHT)
+
+    def _configure_chat_tags(self):
+        """Configures text styling for different types of chat messages."""
         self.chat_display.tag_configure("timestamp", foreground="#888888", font=("Helvetica", 8))
         self.chat_display.tag_configure("self_msg_sender", foreground="blue", font=("Helvetica", 9, "bold"))
         self.chat_display.tag_configure("self_msg_text", foreground="blue")
@@ -309,7 +327,6 @@ class BattleshipGUI(tk.Tk):
         self.chat_display.tag_configure("placement_log_text", foreground="magenta", font=("Helvetica", 9))
         self.chat_display.tag_configure("debug_log_text", foreground="gray", font=("Helvetica", 8, "italic"))
 
-
         # Input field and send button
         input_frame = tk.Frame(self.chat_area_frame)
         input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
@@ -320,6 +337,7 @@ class BattleshipGUI(tk.Tk):
         self.send_button.pack(side=tk.RIGHT)
 
     def _toggle_ship_placement_ui(self, show=False, show_mr_choice=False):
+        """Toggles the visibility of ship placement UI elements."""
         if show:
             self.placement_frame.pack(side=tk.TOP, fill=tk.X, pady=10, after=self.boards_frame)
             if show_mr_choice:
@@ -349,6 +367,7 @@ class BattleshipGUI(tk.Tk):
         self.is_placing_ships = show and not show_mr_choice
 
     def draw_grid_lines(self, canvas):
+        """Draws the grid lines and labels for a game board."""
         # Draw column labels (1-10)
         for i in range(self.board_size):
             x = (i + 1.5) * self.cell_size
@@ -364,10 +383,10 @@ class BattleshipGUI(tk.Tk):
         canvas.config(width=self.cell_size * (self.board_size + 1), height=self.cell_size * (self.board_size + 1))
 
     def _canvas_coord_to_grid_coord(self, event_x, event_y):
+        """Converts canvas coordinates to grid coordinates."""
         grid_origin_x = self.cell_size
         grid_origin_y = self.cell_size
         
-        # Check if click is outside grid area (but within labeled area)
         if event_x < grid_origin_x or event_y < grid_origin_y:
             return None 
         if event_x > grid_origin_x + self.board_size * self.cell_size or \
@@ -382,7 +401,8 @@ class BattleshipGUI(tk.Tk):
         return None
 
     def _on_opponent_board_click(self, event):
-        if self.is_spectator or self.is_placing_ships: # Don't fire if spectator or placing ships
+        """Handles clicks on the opponent's board during gameplay."""
+        if self.is_spectator or self.is_placing_ships:
             return
 
         coord = self._canvas_coord_to_grid_coord(event.x, event.y)
@@ -394,6 +414,7 @@ class BattleshipGUI(tk.Tk):
                 self.log_message("[ERROR] Failed to send fire command.", msg_type="error")
 
     def _on_player_board_click(self, event):
+        """Handles clicks on the player's board during ship placement."""
         if not self.is_placing_ships or self.is_spectator:
             return
 
@@ -403,10 +424,12 @@ class BattleshipGUI(tk.Tk):
             self.selected_coord_label.config(text=f"Selected Start: {coord}")
 
     def _prompt_manual_or_random_placement(self):
+        """Prompts the user to choose between manual or random ship placement."""
         self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?", msg_type="server_info")
         self._toggle_ship_placement_ui(show=True, show_mr_choice=True)
 
     def _send_placement_choice(self, choice):
+        """Sends the user's ship placement choice to the server."""
         if self.sock:
             send_packet(self.sock, PACKET_TYPE_MOVE, choice)
             self.log_message(f"[ACTION] Sent placement choice: {choice}", msg_type="action_log")
@@ -415,6 +438,7 @@ class BattleshipGUI(tk.Tk):
                  self.log_message("[INFO] Waiting for server to send ship details for manual placement...", msg_type="info")
 
     def _start_manual_ship_placement(self, ships_string_from_server):
+        """Starts the manual ship placement process with the given ship details."""
         match = re.search(r"Placing your ([A-Za-z\s]+)\s*\(size (\d+)\)", ships_string_from_server)
         if match:
             self.current_ship_name = match.group(1).strip()
@@ -428,8 +452,8 @@ class BattleshipGUI(tk.Tk):
             self.log_message(f"[ERROR] Could not parse ship details from server: {ships_string_from_server}", msg_type="error")
             self._toggle_ship_placement_ui(show=False)
 
-
     def _confirm_ship_placement_action(self):
+        """Confirms and sends the current ship placement to the server."""
         if not self.selected_placement_coord:
             messagebox.showwarning("Placement Error", "Please select a starting cell on your board.", parent=self)
             return
@@ -446,8 +470,8 @@ class BattleshipGUI(tk.Tk):
             
         self.selected_coord_label.config(text="Selected Start: Waiting...")
 
-
     def _prompt_for_username_and_connect(self):
+        """Handles the initial username prompt and connection process."""
         global current_username 
 
         recent_connections = check_any_recent_connections()
@@ -487,14 +511,32 @@ class BattleshipGUI(tk.Tk):
         self.username = chosen_username
         current_username = self.username 
 
+        self._try_connect_with_username(self.username)
+
+    def _try_connect_with_username(self, username):
+        """Establishes a connection to the server with the given username."""
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+            self.sock = None
+
+        if self.network_thread and self.network_thread.is_alive():
+            self.running = False
+            time.sleep(0.2)
+            self.running = True
+
         try:
+            # Create a brand new socket
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
 
-            if send_packet(self.sock, PACKET_TYPE_USERNAME, self.username):
-                save_connection_info(self.username) 
-                mark_connection_active(self.username) 
+            if send_packet(self.sock, PACKET_TYPE_USERNAME, username):
+                save_connection_info(username) 
+                mark_connection_active(username) 
                 
+                # Start a new network thread
                 self.network_thread = threading.Thread(target=self._receive_messages_thread, daemon=True)
                 self.network_thread.start()
                 
@@ -503,24 +545,25 @@ class BattleshipGUI(tk.Tk):
                 self.log_message("[INFO] You may be placed as a player or spectator.", msg_type="info")
                 self.log_message("[INFO] Type messages in the input field below and press Enter or Send Chat.", msg_type="info")
                 self.log_message("[INFO] Click on opponent's board to fire. Follow prompts for ship placement.", msg_type="info")
-
-
             else:
                 self.log_message("[ERROR] Failed to send username to server.", msg_type="error")
                 messagebox.showerror("Connection Error", "Failed to send username to server.")
                 if self.sock: self.sock.close()
+                self.sock = None
                 self.destroy()
         except ConnectionRefusedError:
             self.log_message(f"[ERROR] Could not connect to server at {HOST}:{PORT}. Check if server is running.", msg_type="error")
-            messagebox.showerror("Connection Error", f"Could not connect to server at {HOST}:{PORT}.\\nCheck if the server is running.")
+            messagebox.showerror("Connection Error", f"Could not connect to server at {HOST}:{PORT}.\nCheck if the server is running.")
             self.destroy()
         except Exception as e:
             self.log_message(f"[ERROR] Connection error: {e}", msg_type="error")
             messagebox.showerror("Connection Error", f"An unexpected connection error occurred: {e}")
             if self.sock: self.sock.close()
+            self.sock = None
             self.destroy()
 
     def _receive_messages_thread(self):
+        """Background thread for receiving and processing server messages."""
         global is_spectator 
         spectator_mode_detected_local = False 
 
@@ -530,17 +573,36 @@ class BattleshipGUI(tk.Tk):
                 if not self.running: break 
 
                 if not valid:
-                    self.server_message_queue.put(("error", "Server sent corrupted data."))
-                    self.server_message_queue.put(("disconnect_event", None))
-                    break
+                    if header is None:
+                        self.server_message_queue.put(("disconnect_event", None))
+                        break
+                    else:
+                        self.server_message_queue.put(("error", "Server sent corrupted data."))
+                        self.server_message_queue.put(("disconnect_event", None))
+                        break
                 
                 if payload is None: 
-                    self.server_message_queue.put(("error", "Server disconnected."))
                     self.server_message_queue.put(("disconnect_event", None))
                     break
                 
                 magic, seq, packet_type, data_len = header
                 payload_str = payload.decode() if isinstance(payload, bytes) else payload
+                
+                if packet_type == PACKET_TYPE_ERROR:
+                    if "username already in use" in payload_str.lower():
+                        self.server_message_queue.put(("error", payload_str))
+                        break
+                    else:
+                        self.server_message_queue.put(("error", payload_str))
+                        
+                        if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
+                            self.log_message("[ATTENTION] You have timed out! Please respond promptly.", msg_type="error")
+                        elif "Invalid placement" in payload_str:
+                            self.log_message("[PLACEMENT ERROR] Server rejected ship placement. Try again.", msg_type="placement_log")
+                            if hasattr(self, 'selected_coord_label'):
+                                self.selected_coord_label.config(text="Selected Start: Invalid!")
+                    
+                    continue
                 
                 self.server_message_queue.put(("packet", packet_type, payload_str))
 
@@ -568,8 +630,8 @@ class BattleshipGUI(tk.Tk):
                 self.server_message_queue.put(("disconnect_event", None))
                 break
 
-
     def _process_gui_queue(self):
+        """Processes messages from the server message queue and updates the GUI accordingly."""
         global current_username, is_spectator
 
         while not self.server_message_queue.empty():
@@ -579,11 +641,53 @@ class BattleshipGUI(tk.Tk):
                 if msg_type == "packet":
                     packet_type, payload_str = data[0], data[1]
                     self._handle_packet(packet_type, payload_str)
+                elif msg_type == "username_error":
+                    error_msg = data[0]
+                    self.log_message(f"[ERROR] {error_msg}", msg_type="error")
+                    self.log_message("[INFO] Please enter a different username", msg_type="info")
+                    
+                    if self.sock:
+                        try:
+                            self.sock.close()
+                        except:
+                            pass
+                        self.sock = None
+                    
+                    new_username = simpledialog.askstring("Username", "Username already in use. Please enter a different username:", parent=self)
+                    if new_username:
+                        self.username = new_username
+                        current_username = new_username
+                        self._try_connect_with_username(new_username)
+                    else:
+                        self._shutdown_client(save_info=False)
+                    return
                 elif msg_type == "error":
                     error_msg = data[0]
                     self.log_message(f"[ERROR] {error_msg}", msg_type="error")
-                    if "username already in use" in error_msg.lower() or \
-                       "expected username packet first" in error_msg.lower() or \
+                    
+                    if "username already in use" in error_msg.lower():
+                        if self.sock:
+                            try:
+                                self.sock.close()
+                            except:
+                                pass
+                            self.sock = None
+                        
+                        new_username = simpledialog.askstring("Username", "Username already in use. Please enter a different username:", parent=self)
+                        if new_username:
+                            self.username = new_username
+                            current_username = new_username
+                            self._try_connect_with_username(new_username)
+                        else:
+                            self._shutdown_client(save_info=False)
+                        return
+                    
+                    elif "disconnected" in error_msg.lower() or "connection lost" in error_msg.lower():
+                        if self.username:
+                            save_connection_info(self.username)
+                            self.log_message(f"[INFO] Your username '{self.username}' was saved for potential reconnection.", msg_type="info")
+                            
+                    elif "expected username packet first" in error_msg.lower() or \
                        "username cannot be empty" in error_msg.lower():
                         messagebox.showerror("Connection Error", error_msg)
                         self._shutdown_client() 
@@ -605,20 +709,19 @@ class BattleshipGUI(tk.Tk):
                     is_spectator = True
                     self.log_message("\n[INFO] You are in spectator mode. Observe the game - no moves allowed.", msg_type="info")
                     self.title(f"Battleship Client - {self.username} (Spectator)")
-                    # Set initial labels for spectator boards
                     self.player_board_label.config(text="Player 1's Board (Spectator)")
-                    if hasattr(self, 'opponent_board_name_label'): # Ensure it exists
+                    if hasattr(self, 'opponent_board_name_label'): 
                         self.opponent_board_name_label.config(text="Player 2's Board (Spectator)")
-                    # Clear boards
                     self.draw_board_on_canvas(self.player_board_canvas, [])
                     self.draw_board_on_canvas(self.opponent_board_canvas, [])
             except Exception as e:
                 self.log_message(f"[ERROR] Error processing GUI queue: {e}")
 
         if self.running:
-            self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue) 
+            self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue)
 
     def _handle_packet(self, packet_type, payload_str):
+        """Handles different types of packets received from the server."""
         global current_username
 
         if packet_type == PACKET_TYPE_BOARD_UPDATE:
@@ -640,17 +743,7 @@ class BattleshipGUI(tk.Tk):
                     os.remove(get_connection_file(self.username))
                 except: pass
         elif packet_type == PACKET_TYPE_ERROR:
-            self.log_message("\n[ERROR] " + payload_str, msg_type="error")
-            if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
-                 self.log_message("[ATTENTION] You have timed out! Please respond promptly.", msg_type="error")
-            if self.username and ("disconnected" in payload_str.lower() or "connection lost" in payload_str.lower() or "username already in use" in payload_str.lower()):
-                save_connection_info(self.username)
-                self.log_message(f"[INFO] Your username '{self.username}' was saved for potential reconnection.", msg_type="info")
-            if "Invalid placement" in payload_str:
-                self.log_message("[PLACEMENT ERROR] Server rejected ship placement. Try again.", msg_type="placement_log")
-                self.selected_coord_label.config(text="Selected Start: Invalid!")
-
-
+            pass
         elif packet_type == PACKET_TYPE_RECONNECT:
             self.log_message("\n[RECONNECTED] " + payload_str, msg_type="info")
             if self.username:
@@ -735,6 +828,7 @@ class BattleshipGUI(tk.Tk):
         self.chat_display.see(tk.END)
 
     def _filter_board_data_for_logging(self, board_update_payload):
+        """Filters board update data to extract relevant event information for logging."""
         event_lines = []
         lines = board_update_payload.strip().split('\n')
 
@@ -785,6 +879,7 @@ class BattleshipGUI(tk.Tk):
         return result
 
     def update_boards_from_string(self, board_string):
+        """Updates the game boards based on the received board string from the server."""
         lines = board_string.strip().split('\n')
 
         if self.is_spectator:
@@ -792,7 +887,6 @@ class BattleshipGUI(tk.Tk):
             player2_grid_data = []
             current_parsing_target_spectator = None
 
-            # Update labels based on stored spectator usernames
             if self.spectator_player1_username:
                 self.player_board_label.config(text=f"{self.spectator_player1_username}'s Board")
             else:
@@ -804,13 +898,11 @@ class BattleshipGUI(tk.Tk):
                 else:
                     self.opponent_board_name_label.config(text="Player 2's Board (Spectator)")
 
-            # Define expected headers based on known usernames
             expected_p1_header = f"{self.spectator_player1_username}'s Grid:" if self.spectator_player1_username else None
             expected_p2_header = f"{self.spectator_player2_username}'s Grid:" if self.spectator_player2_username else None
 
             generic_p1_header_text = "Player 1's Grid:"
             generic_p2_header_text = "Player 2's Grid:"
-
 
             for line in lines:
                 line_strip = line.strip()
@@ -879,12 +971,10 @@ class BattleshipGUI(tk.Tk):
                         self.opponent_board_name_label.config(text="Opponent's Board")
                     continue
                 
-                # Skip column number lines (e.g., "  1 2 3 ...")
                 if line_strip and line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
                     if all(item.isdigit() for item in line_strip.split()):
                         continue
                 
-                # Parse grid data lines
                 if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip :
                     cells = [c for c in line_strip.split(' ') if c]
                     if cells:
@@ -902,8 +992,8 @@ class BattleshipGUI(tk.Tk):
             if opponent_grid_data:
                 self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
 
-
     def draw_board_on_canvas(self, canvas, grid_data):
+        """Draws the game board on the specified canvas using the provided grid data."""
         canvas.delete("cells")
 
         grid_origin_x = self.cell_size
@@ -946,13 +1036,12 @@ class BattleshipGUI(tk.Tk):
                                         center_y + (ship_ring_outer_radius - ship_ring_thickness),
                                         fill='purple', outline='purple', tags="cells")
 
-
                 elif cell_char == 'o': # Miss
                     canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
                                         center_x + miss_dot_radius, center_y + miss_dot_radius,
                                         fill='white', outline='white', tags="cells")
 
-                elif cell_char == 'X': # Hity
+                elif cell_char == 'X': # Hit
                     canvas.create_line(x0_rect + hit_x_padding, y0_rect + hit_x_padding,
                                         x1_rect - hit_x_padding, y1_rect - hit_x_padding,
                                         fill='#DC143C', width=3, tags="cells")
@@ -960,8 +1049,8 @@ class BattleshipGUI(tk.Tk):
                                         x1_rect - hit_x_padding, y0_rect + hit_x_padding,
                                         fill='#DC143C', width=3, tags="cells")
 
-
     def _send_input(self, event=None): 
+        """Handles user input from the chat/command field."""
         global current_username, is_spectator 
 
         if not self.sock or not self.running:
@@ -1014,6 +1103,7 @@ class BattleshipGUI(tk.Tk):
                 self.log_message("[ERROR] Failed to send message to server.", msg_type="error")
 
     def log_message(self, message, msg_type=None):
+        """Logs a message to the chat display with appropriate formatting."""
         if self.chat_display.winfo_exists():
             self.chat_display.config(state=tk.NORMAL)
             
@@ -1041,6 +1131,7 @@ class BattleshipGUI(tk.Tk):
             self.chat_display.see(tk.END)
 
     def _on_closing(self):
+        """Handles the window closing event."""
         if messagebox.askokcancel("Quit", "Do you want to quit Battleship?"):
             self.log_message("[INFO] Quit by closing window.", msg_type="info")
             if self.sock:
@@ -1048,6 +1139,7 @@ class BattleshipGUI(tk.Tk):
             self._shutdown_client(save_info=True) 
 
     def _shutdown_client(self, save_info=True):
+        """Shuts down the client and cleans up resources."""
         self.running = False 
         if self.username and save_info:
             save_connection_info(self.username) 
@@ -1065,14 +1157,16 @@ class BattleshipGUI(tk.Tk):
             self.destroy()
 
 
-# Dialog for Reconnection
 class ReconnectionDialog(simpledialog.Dialog):
+    """Dialog for handling reconnection to a previous game session."""
+    
     def __init__(self, parent, title, options):
         self.options = options
         self.choice = None 
         super().__init__(parent, title)
 
     def body(self, master):
+        """Creates the dialog body with a listbox of reconnection options."""
         tk.Label(master, text="Recent disconnection(s) found:").pack(pady=5)
         self.listbox = tk.Listbox(master, selectmode=tk.SINGLE, exportselection=False)
         for i, option_text in enumerate(self.options):
@@ -1082,6 +1176,7 @@ class ReconnectionDialog(simpledialog.Dialog):
         return self.listbox 
 
     def buttonbox(self):
+        """Creates the dialog buttons."""
         box = tk.Frame(self)
         tk.Button(box, text="Reconnect Selected", width=20, command=self.ok, default=tk.ACTIVE).pack(side=tk.LEFT, padx=5, pady=5)
         tk.Button(box, text="New Connection", width=15, command=self.new_connection).pack(side=tk.LEFT, padx=5, pady=5)
@@ -1091,6 +1186,7 @@ class ReconnectionDialog(simpledialog.Dialog):
         box.pack()
 
     def ok(self, event=None):
+        """Handles the OK button click."""
         selection = self.listbox.curselection()
         if selection:
             self.choice = selection[0]
@@ -1099,10 +1195,12 @@ class ReconnectionDialog(simpledialog.Dialog):
         super().ok()
     
     def new_connection(self):
+        """Handles the New Connection button click."""
         self.choice = -1 
         super().ok() 
 
     def cancel(self):
+        """Handles the Cancel button click."""
         self.choice = None 
         super().cancel()
 

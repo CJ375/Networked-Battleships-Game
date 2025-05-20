@@ -2,7 +2,8 @@
 protocol.py
 
 Implements a custom packet protocol for Battleship game communication.
-Includes packet structure, serialization, checksum verification, and AES encryption.
+The protocol provides secure communication with the packet structure,
+serialization, checksum verification, and AES encryption.
 """
 
 import struct
@@ -14,11 +15,13 @@ import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
+# Debug configuration
 PROTOCOL_VERBOSE_DEBUG = True
 
-MAGIC_NUMBER = 0x42534850
+# Protocol constants
+MAGIC_NUMBER = 0x42534850  # "BSHP" in hex
 
-# Packet types
+# Packet type definitions
 PACKET_TYPE_USERNAME = 1
 PACKET_TYPE_GAME_START = 2
 PACKET_TYPE_MOVE = 3 
@@ -31,56 +34,53 @@ PACKET_TYPE_ACK = 9
 PACKET_TYPE_HEARTBEAT = 10
 PACKET_TYPE_CHAT = 11
 
-# Packet header format:
-# - Magic Number (4 bytes) - Identifies protocol
-# - Sequence Number (4 bytes) - Used for ordering and detecting missing packets
-# - Packet Type (1 byte) - Identifies the type of packet
-# - Data Length (4 bytes) - Length of the (IV + encrypted payload) in bytes
-# - Checksum (4 bytes) - CRC32 checksum for data integrity
-# Total header size: 17 bytes
-# Followed by IV (16 bytes) + variable-length encrypted payload data
+# Packet structure:
+# Header (17 bytes):
+#   - Magic Number (4 bytes): Protocol identifier
+#   - Sequence Number (4 bytes): Packet ordering
+#   - Packet Type (1 byte): Message type
+#   - Data Length (4 bytes): Length of encrypted data
+#   - Checksum (4 bytes): CRC32 for integrity
+# Payload:
+#   - IV (16 bytes): Initialization vector
+#   - Encrypted data (variable length)
 
 HEADER_SIZE = 17
-HEADER_FORMAT = ">IIBI" # unsigned int, unsigned int, unsigned char, unsigned int
+HEADER_FORMAT = ">IIBI"  # unsigned int, unsigned int, unsigned char, unsigned int
 
-# Encryption constants
+# Encryption configuration
 AES_KEY_SIZE = 32  # 256-bit key
-IV_SIZE = 16       # AES block size, 128-bit IV for CTR mode
-
+IV_SIZE = 16       # 128-bit IV for CTR mode
 PRE_SHARED_KEY = b'\x00' * AES_KEY_SIZE
 
-# Global sequence number counter
+# Global sequence tracking
 next_sequence_number = 0
 
 def get_next_sequence_number():
-    """Get the next sequence number for packet sending"""
+    """Returns the next sequence number for packet ordering."""
     global next_sequence_number
     seq = next_sequence_number
-    next_sequence_number = (next_sequence_number + 1) % 0xFFFFFFFF  # Wrap around at max 32-bit value
+    next_sequence_number = (next_sequence_number + 1) % 0xFFFFFFFF
     return seq
 
 def calculate_checksum(data):
-    """Calculate CRC32 checksum for the given data"""
-    return binascii.crc32(data) & 0xFFFFFFFF  # Ensure 32-bit unsigned value
+    """Calculates CRC32 checksum for data integrity verification."""
+    return binascii.crc32(data) & 0xFFFFFFFF
 
 def _encrypt_payload(payload_bytes, key, iv):
-    """Encrypts payload using AES-CTR."""
+    """Encrypts data using AES-CTR mode."""
     cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
     encryptor = cipher.encryptor()
     return encryptor.update(payload_bytes) + encryptor.finalize()
 
 def _decrypt_payload(encrypted_payload_bytes, key, iv):
-    """Decrypts payload using AES-CTR."""
+    """Decrypts data using AES-CTR mode."""
     cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     return decryptor.update(encrypted_payload_bytes) + decryptor.finalize()
 
 def create_packet(packet_type, payload):
-    """
-    Create a packet with the specified type and payload.
-    The payload is encrypted before packet creation.
-    Returns the complete packet as bytes.
-    """
+    """Creates an encrypted packet with the specified type and payload."""
     seq_num = get_next_sequence_number()
     payload_bytes = payload.encode() if isinstance(payload, str) else payload
     
@@ -103,11 +103,7 @@ def create_packet(packet_type, payload):
     return full_header + iv + encrypted_payload
 
 def decode_header(header_bytes):
-    """
-    Decode the packet header.
-    Returns a tuple of (magic_number, sequence_number, packet_type, data_length, checksum).
-    data_length is the length of (IV + encrypted_payload).
-    """
+    """Decodes packet header into its components."""
     if len(header_bytes) != HEADER_SIZE:
         raise ValueError(f"Invalid header size: {len(header_bytes)}, expected {HEADER_SIZE}")
     
@@ -117,14 +113,8 @@ def decode_header(header_bytes):
     return (magic, seq, ptype, dlen, checksum)
 
 def verify_packet(packet_bytes):
-    """
-    Verify packet integrity using the checksum.
-    The payload of packet_bytes is (IV + encrypted_payload).
-    Returns a tuple of (is_valid, decoded_header_info, iv_plus_encrypted_payload).
-    decoded_header_info = (magic, seq, ptype, dlen_of_iv_plus_encrypted_payload)
-    If is_valid is False, iv_plus_encrypted_payload will be None.
-    """
-    if len(packet_bytes) < HEADER_SIZE + IV_SIZE: # Must have header and IV
+    """Verifies packet integrity using checksum and structure validation."""
+    if len(packet_bytes) < HEADER_SIZE + IV_SIZE:
         if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Packet too short for header + IV: {len(packet_bytes)}")
         return (False, None, None)
     
@@ -155,11 +145,7 @@ def verify_packet(packet_bytes):
     return (is_valid, decoded_header_info, iv_plus_encrypted_payload if is_valid else None)
 
 def receive_packet(sock, timeout=None):
-    """
-    Receive a packet from the socket, verifies, and decrypts its payload.
-    Returns a tuple of (is_valid, final_decoded_header, decrypted_payload).
-    final_decoded_header = (magic, seq, ptype, dlen_of_decrypted_payload)
-    """
+    """Receives and processes a packet from the socket."""
     original_timeout = sock.gettimeout()
     try:
         if timeout is not None:
@@ -228,11 +214,7 @@ def receive_packet(sock, timeout=None):
                 if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Error restoring socket timeout: {se_sock}")
 
 def send_packet(sock, packet_type, payload, max_retries=3):
-    """
-    Send a packet with retry logic if needed.
-    Payload is encrypted by create_packet.
-    Returns True if the packet was sent successfully, False otherwise.
-    """
+    """Sends a packet with retry logic for reliability."""
     try:
         packet = create_packet(packet_type, payload)
         payload_len = len(payload.encode() if isinstance(payload, str) else payload)
@@ -254,10 +236,7 @@ def send_packet(sock, packet_type, payload, max_retries=3):
     return False
 
 def corrupt_packet(packet_bytes, corruption_rate=0.01):
-    """
-    Randomly corrupt some bytes in the packet to simulate transmission errors.
-    corruption_rate is the probability of corrupting each byte.
-    """
+    """Simulates transmission errors by randomly corrupting packet bytes."""
     corrupted = bytearray(packet_bytes)
     for i in range(len(corrupted)):
         if random.random() < corruption_rate:
@@ -265,17 +244,12 @@ def corrupt_packet(packet_bytes, corruption_rate=0.01):
     return bytes(corrupted)
 
 def handle_corrupted_packet(sock, seq_num):
-    """
-    Request retransmission of a corrupted packet.
-    This is a simple implementation - would need to be expanded for a full 
-    reliable protocol implementation.
-    """
-    # Send negative ACK (retransmission request)
+    """Requests retransmission of a corrupted packet."""
     nack_payload = struct.pack(">I", seq_num)
     send_packet(sock, PACKET_TYPE_ERROR, nack_payload)
 
 def get_packet_type_name(packet_type):
-    """Get a string representation of the packet type"""
+    """Returns a human-readable name for the packet type."""
     packet_types = {
         PACKET_TYPE_USERNAME: "USERNAME",
         PACKET_TYPE_GAME_START: "GAME_START",
