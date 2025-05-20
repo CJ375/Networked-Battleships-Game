@@ -672,9 +672,6 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     player2_board = Board(BOARD_SIZE)
 
     is_resumed_game = bool(initial_player1_board_state and initial_player2_board_state and initial_current_player_name)
-    # print(f"[GAME LOGIC battleship.py] run_two_player_game invoked. is_resumed_game: {is_resumed_game}")
-    # print(f"[GAME LOGIC battleship.py] Details: P1 Board State Provided: {bool(initial_player1_board_state)}, P2 Board State Provided: {bool(initial_player2_board_state)}, Initial Current Player: {initial_current_player_name}")
-
 
     if is_resumed_game:
         try:
@@ -683,11 +680,9 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(player1_wfile, "Game resumed.")
             send_to_player(player2_wfile, "Game resumed.")
             notify_spectators_callback("Game has been resumed.")
-            # print(f"[GAME LOGIC] Resuming game. P1 ships: {len(player1_board.placed_ships)}, P2 ships: {len(player2_board.placed_ships)}")
             if not player1_board.placed_ships or not player2_board.placed_ships :
-                 print("[GAME LOGIC WARNING] Resumed game but one or both players appear to have no ships placed. This might be okay if resuming before placement finished, or an error.")
+                 print("[GAME LOGIC WARNING] Resumed game but one or both players appear to have no ships placed.")
         except Exception as e:
-            print(f"[GAME LOGIC ERROR] Failed to deserialize board states: {e}. Starting a new game.")
             is_resumed_game = False
             player1_board = Board(BOARD_SIZE)
             player2_board = Board(BOARD_SIZE)
@@ -703,20 +698,16 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         
         try:
             if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, player1_username):
-                 # print(f"[GAME LOGIC] {player1_username} quit or disconnected during placement (handle_ship_placement returned False).")
                  raise PlayerDisconnectedError(player1_username, {
                     'player1_board_state': player1_board.serialize(),
                     'player2_board_state': player2_board.serialize(),
                     'next_turn_username': player1_username 
                 })
         except PlayerDisconnectedError as pde:
-            # print(f"[GAME LOGIC DEBUG] run_two_player_game caught PlayerDisconnectedError for {pde.player_name}.")
             if not pde.game_state:
-                next_turn = player1_username if pde.player_name == player2_username else player2_username
+                next_turn = player1_username if pde.player_name == player2_username else player2_username 
                 if 'current_player_name_for_turn' in locals() and current_player_name_for_turn:
                     next_turn = current_player_name_for_turn
-                
-                # print(f"[GAME LOGIC DEBUG] Populating game_state in top-level PDE handler. Next turn would be: {next_turn}")
                 pde.game_state = {
                     'player1_board_state': player1_board.serialize(),
                     'player2_board_state': player2_board.serialize(),
@@ -724,7 +715,6 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 }
             raise
         except Exception as e:
-            print(f"[GAME LOGIC ERROR] Unexpected error in run_two_player_game: {e}")
             raise
 
         send_to_player(player1_wfile, f"Waiting for {player2_username} to place ships...")
@@ -738,13 +728,10 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     'next_turn_username': player2_username
                 })
         except PlayerDisconnectedError as pde:
-            # print(f"[GAME LOGIC DEBUG] run_two_player_game caught PlayerDisconnectedError for {pde.player_name}.")
             if not pde.game_state:
                 next_turn = player1_username if pde.player_name == player2_username else player2_username 
                 if 'current_player_name_for_turn' in locals() and current_player_name_for_turn:
                     next_turn = current_player_name_for_turn
-                
-                # print(f"[GAME LOGIC DEBUG] Populating game_state in top-level PDE handler. Next turn would be: {next_turn}")
                 pde.game_state = {
                     'player1_board_state': player1_board.serialize(),
                     'player2_board_state': player2_board.serialize(),
@@ -752,7 +739,6 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 }
             raise
         except Exception as e:
-            print(f"[GAME LOGIC ERROR] Unexpected error in run_two_player_game: {e}")
             raise
 
         send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
@@ -762,7 +748,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     current_player_name_for_turn = initial_current_player_name if is_resumed_game else player1_username
     consecutive_timeouts = 0
     
-    try:
+    try: 
         while True:
             current_player_is_p1 = (current_player_name_for_turn == player1_username)
 
@@ -789,7 +775,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
                 send_to_player(other_wfile, f"{actual_current_player_name} has quit. You win by default!")
                 notify_spectators_callback(f"{actual_current_player_name} has quit. {opponent_name} wins.")
-                return None
+                return None 
 
             try:
                 row, col = parse_coordinate(guess)
@@ -813,40 +799,36 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
                         send_to_player(other_wfile, f"Game over! {actual_current_player_name} has sunk all your ships.")
                         notify_spectators_callback(f"Game over! {actual_current_player_name} has won by sinking all of {opponent_name}'s ships!")
-                        return None
+                        return None 
                 elif result == 'miss':
                     send_to_player(current_wfile, "MISS!")
                     send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and missed!")
                     notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and missed!")
                 elif result == 'already_shot':
                     send_to_player(current_wfile, "You've already fired at that location. Try again.")
-                    continue
+                    continue  
                 elif result == 'invalid':
                     send_to_player(current_wfile, "Invalid coordinate. Please enter a valid coordinate (e.g. A1-J10).")
-                    continue
+                    continue 
 
             except ValueError as e:
                 send_to_player(current_wfile, f"Invalid input: {e}. Try again.")
-                continue
+                continue 
             
-            current_player_name_for_turn = opponent_name
+            current_player_name_for_turn = opponent_name 
             
     except PlayerDisconnectedError as pde:
-        # print(f"[GAME LOGIC] PlayerDisconnectedError for '{pde.player_name}' caught in main game loop of run_two_player_game.")
-        
         turn_for_resumption = actual_current_player_name 
         
-        if not pde.game_state: # Only populate if not already set
-            # print(f"[GAME LOGIC] Populating game_state in run_two_player_game for PDE affecting '{pde.player_name}'. Next turn on resume will be '{turn_for_resumption}'.")
+        if not pde.game_state: 
             pde.game_state = {
                 'player1_board_state': player1_board.serialize(),
                 'player2_board_state': player2_board.serialize(),
                 'next_turn_username': turn_for_resumption
             }
         else:
-            # print(f"[GAME LOGIC] game_state already present in PlayerDisconnectedError for '{pde.player_name}'. Not overwriting in run_two_player_game.")
-            pass # Explicitly pass if game_state already exists, no need to print unless debugging
-        raise # Re-raise for handle_game_session to catch and process
+            pass
+        raise 
 
     return None
 

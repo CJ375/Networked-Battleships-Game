@@ -57,7 +57,6 @@ def save_connection_info(username):
                 'disconnected': True 
             }, f)
     except Exception as e:
-        print(f"[WARNING] Could not save connection information: {e}")
         pass
 
 def mark_connection_active(username):
@@ -126,30 +125,22 @@ def check_any_recent_connections():
 
                         if elapsed > reconnect_timeout_period:
                             stale_files_to_remove.append(connection_file)
-                            if username:
-                                print(f"[INFO] Marked stale connection file for '{username}' for removal (age: {elapsed:.0f}s).")
-                            else:
-                                print(f"[INFO] Marked stale connection file {filename} for removal (age: {elapsed:.0f}s).")
                             continue
 
                         if username and disconnected:
                             recent_usernames.append((username, elapsed))
                 except json.JSONDecodeError:
-                    print(f"[WARNING] Corrupted connection file (JSONDecodeError): {connection_file}. Marking for removal.")
                     stale_files_to_remove.append(connection_file)
                 except Exception as e_read:
-                    print(f"[WARNING] Could not read or process connection file {connection_file}: {e_read}. It may be removed if deemed stale by other means or left if not.")
                     continue
     except Exception as e_list:
-        print(f"[WARNING] Could not list directory for reconnection files: {e_list}")
         pass
 
     for file_to_remove in stale_files_to_remove:
         try:
             os.remove(file_to_remove)
-            print(f"[INFO] Successfully removed stale/corrupted connection file: {file_to_remove}")
         except Exception as e_remove:
-            print(f"[WARNING] Failed to remove stale/corrupted connection file {file_to_remove}: {e_remove}")
+            pass
 
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
@@ -317,7 +308,6 @@ class BattleshipGUI(tk.Tk):
                 self.confirm_placement_button.pack()
         else:
             self.placement_frame.pack_forget()
-            self.manual_random_frame.pack_forget()
         self.is_placing_ships = show and not show_mr_choice
 
     def draw_grid_lines(self, canvas):
@@ -359,7 +349,6 @@ class BattleshipGUI(tk.Tk):
 
         coord = self._canvas_coord_to_grid_coord(event.x, event.y)
         if coord and self.sock:
-            self.log_message(f"[ACTION] Firing at {coord} on opponent's board (from click).", msg_type="action_log")
             if send_packet(self.sock, PACKET_TYPE_MOVE, coord):
                 self.last_fired_coord = coord
                 self.awaiting_shot_result = True
@@ -374,7 +363,6 @@ class BattleshipGUI(tk.Tk):
         if coord:
             self.selected_placement_coord = coord
             self.selected_coord_label.config(text=f"Selected Start: {coord}")
-            self.log_message(f"[PLACEMENT] Selected starting cell: {coord} for {self.current_ship_name}", msg_type="placement_log")
 
     def _prompt_manual_or_random_placement(self):
         self.log_message("[SERVER] Would you like to place ships manually (M) or randomly (R)?", msg_type="server_info")
@@ -389,9 +377,7 @@ class BattleshipGUI(tk.Tk):
                  self.log_message("[INFO] Waiting for server to send ship details for manual placement...", msg_type="info")
 
     def _start_manual_ship_placement(self, ships_string_from_server):
-        self.log_message(f"[INFO] Starting manual ship placement. Server says: {ships_string_from_server}", msg_type="info")
-        
-        match = re.search(r"Placing your ([A-Za-z\s]+)\s*\(size (\d+)\)\.", ships_string_from_server)
+        match = re.search(r"Placing your ([A-Za-z\s]+)\s*\(size (\d+)\)", ships_string_from_server)
         if match:
             self.current_ship_name = match.group(1).strip()
             self.current_ship_length = int(match.group(2))
@@ -534,7 +520,6 @@ class BattleshipGUI(tk.Tk):
                 self.server_message_queue.put(("disconnect_event", None))
                 break
             except socket.timeout: 
-                if self.running: self.log_message("[DEBUG] Socket timeout in receive thread (should be handled by receive_packet).", msg_type="debug")
                 continue 
             except OSError as e: 
                  if self.running: self.server_message_queue.put(("error", f"Socket error: {e}"))
@@ -599,26 +584,25 @@ class BattleshipGUI(tk.Tk):
         global current_username
 
         if packet_type == PACKET_TYPE_BOARD_UPDATE:
-            self.log_message("\n" + payload_str, msg_type="game_event")
+            event_summary = self._filter_board_data_for_logging(payload_str)
+            if event_summary:
+                self.log_message("\n" + event_summary, msg_type="game_event")
+
             self.update_boards_from_string(payload_str)
             self.awaiting_shot_result = False
             self.last_fired_coord = None
             
-            if self.is_placing_ships and "All ships have been placed" in payload_str :
-                 self._toggle_ship_placement_ui(show=False)
         elif packet_type == PACKET_TYPE_GAME_START:
-            self.log_message(f"\n[GAME START] {payload_str}", msg_type="game_event")
-            self.player_board_label.config(text=f"Your Board ({self.username})")
+            self.log_message("\n[GAME START] " + payload_str, msg_type="game_event")
         elif packet_type == PACKET_TYPE_GAME_END:
-            self.log_message(f"\n[GAME END] {payload_str}", msg_type="game_event")
+            self.log_message("\n[GAME END] " + payload_str, msg_type="game_event")
             self._toggle_ship_placement_ui(show=False)
             if self.username: 
                 try:
                     os.remove(get_connection_file(self.username))
-                    self.log_message("[DEBUG] Removed connection file as game ended normally.", msg_type="debug")
                 except: pass
         elif packet_type == PACKET_TYPE_ERROR:
-            self.log_message(f"\n[ERROR] {payload_str}", msg_type="error")
+            self.log_message("\n[ERROR] " + payload_str, msg_type="error")
             if "timeout" in payload_str.lower() or "timed out" in payload_str.lower():
                  self.log_message("[ATTENTION] You have timed out! Please respond promptly.", msg_type="error")
             if self.username and ("disconnected" in payload_str.lower() or "connection lost" in payload_str.lower() or "username already in use" in payload_str.lower()):
@@ -630,16 +614,14 @@ class BattleshipGUI(tk.Tk):
 
 
         elif packet_type == PACKET_TYPE_RECONNECT:
-            self.log_message(f"\n[RECONNECTED] {payload_str}", msg_type="info")
+            self.log_message("\n[RECONNECTED] " + payload_str, msg_type="info")
             if self.username:
                 mark_connection_active(self.username)
         elif packet_type == PACKET_TYPE_HEARTBEAT:
-            self.log_message("[DEBUG] Received heartbeat, sending ACK", msg_type="debug")
             if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')
         elif packet_type == PACKET_TYPE_CHAT:
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
-                self.log_message(payload_str, msg_type="server_info")
                 self.chat_display.see(tk.END)
                 return
 
@@ -683,7 +665,7 @@ class BattleshipGUI(tk.Tk):
                         except IndexError:
                             pass
                 if parsed_p1 or parsed_p2:
-                    self.log_message(f"[DEBUG] Spectator names updated: P1='{self.spectator_player1_username}', P2='{self.spectator_player2_username}'", msg_type="debug")
+                    pass
                 self.log_message(payload_str, msg_type="game_event")
                 is_spectator_status_msg = True
             
@@ -712,13 +694,61 @@ class BattleshipGUI(tk.Tk):
                         self.log_message(payload_str, msg_type="info") 
 
         else:
-            self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}", msg_type="debug")
-            self.log_message(payload_str, msg_type="debug")
+            pass
         
         self.chat_display.see(tk.END)
 
+    def _filter_board_data_for_logging(self, board_update_payload):
+        event_lines = []
+        lines = board_update_payload.strip().split('\n')
+
+        for line in lines:
+            stripped_line = line.strip()
+
+            is_grid_header = False
+            if stripped_line.endswith(" Grid:"):
+                if stripped_line == "Your Grid:" or \
+                   stripped_line == "Opponent's Grid:" or \
+                   stripped_line == "Player 1's Grid:" or \
+                   stripped_line == "Player 2's Grid:":
+                    is_grid_header = True
+                elif self.spectator_player1_username and stripped_line == f"{self.spectator_player1_username}'s Grid:":
+                    is_grid_header = True
+                elif self.spectator_player2_username and stripped_line == f"{self.spectator_player2_username}'s Grid:":
+                    is_grid_header = True
+            
+            if is_grid_header:
+                continue
+
+            items_in_line = stripped_line.split()
+            if len(items_in_line) > 1 and all(item.isdigit() for item in items_in_line):
+                is_likely_column_header = True
+                if len(items_in_line) == self.board_size:
+                    try:
+                        for i, item_val in enumerate(items_in_line):
+                            if int(item_val) != i + 1:
+                                is_likely_column_header = False
+                                break
+                    except ValueError:
+                        is_likely_column_header = False
+                else:
+                    is_likely_column_header = False
+
+                if is_likely_column_header:
+                    continue
+            
+            if (len(stripped_line) > 1 and 
+                'A' <= stripped_line[0].upper() <= chr(ord('A') + self.board_size - 1) and 
+                stripped_line[1] == ' ' and
+                len(stripped_line.split()) == self.board_size + 1):
+                continue
+            
+            event_lines.append(line)
+        
+        result = "\n".join(event_lines).strip() 
+        return result
+
     def update_boards_from_string(self, board_string):
-        self.log_message("[GUI Board Update Triggered]", msg_type="debug")
         lines = board_string.strip().split('\n')
 
         if self.is_spectator:
@@ -786,13 +816,11 @@ class BattleshipGUI(tk.Tk):
                                     elif current_parsing_target_spectator == "P2":
                                         player2_grid_data.append(cells)
                                 else:
-                                    self.log_message(f"[DEBUG SPECTATOR] Mismatched cell count for row {row_char}. Got {len(cells)}, expected {self.board_size}. Line: '{line_strip}'", msg_type="debug")
+                                    pass
             
             if player1_grid_data or current_parsing_target_spectator == "P1":
-                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 1 grid ({len(player1_grid_data)} rows)", msg_type="debug")
                 self.draw_board_on_canvas(self.player_board_canvas, player1_grid_data)
             if player2_grid_data or current_parsing_target_spectator == "P2":
-                self.log_message(f"[DEBUG SPECTATOR] Drawing Player 2 grid ({len(player2_grid_data)} rows)", msg_type="debug")
                 self.draw_board_on_canvas(self.opponent_board_canvas, player2_grid_data)
 
         else:
@@ -831,13 +859,11 @@ class BattleshipGUI(tk.Tk):
                             elif current_parsing_grid == "opponent":
                                 opponent_grid_data.append(cells)
                         else:
-                            self.log_message(f"[DEBUG PLAYER] Board parse: Mismatched cell count for row {row_char}. Expected {self.board_size}, got {len(cells)}. Line: '{line_strip}'", msg_type="debug")
+                            pass
             
             if player_grid_data:
-                self.log_message(f"[DEBUG PLAYER] Drawing player grid with data: {player_grid_data}", msg_type="debug")
                 self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
             if opponent_grid_data:
-                self.log_message(f"[DEBUG PLAYER] Drawing opponent grid with data: {opponent_grid_data}", msg_type="debug")
                 self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
 
 
@@ -868,21 +894,16 @@ class BattleshipGUI(tk.Tk):
                 center_x = x0_rect + self.cell_size / 2
                 center_y = y0_rect + self.cell_size / 2
 
-                #Draw common cell background
                 canvas.create_rectangle(x0_rect, y0_rect, x1_rect, y1_rect, fill=water_bg_color, outline=water_bg_color, tags="cells")
 
-                # 2. Pre-populate with a base dot for all cells initially (very light gray)
                 canvas.create_oval(center_x - base_dot_radius, center_y - base_dot_radius,
                                     center_x + base_dot_radius, center_y + base_dot_radius,
-                                    fill='#E0E0E0', outline='#E0E0E0', tags="cells") # Light gray for base dot
+                                    fill='#E0E0E0', outline='#E0E0E0', tags="cells")
 
-                # 3. Draw specific markers based on cell_char
                 if cell_char == 'S': # Ship
-                    # Outer circle of the ring
                     canvas.create_oval(center_x - ship_ring_outer_radius, center_y - ship_ring_outer_radius,
                                         center_x + ship_ring_outer_radius, center_y + ship_ring_outer_radius,
                                         fill='purple', outline='purple', tags="cells")
-                    # Inner circle
                     canvas.create_oval(center_x - (ship_ring_outer_radius - ship_ring_thickness), 
                                         center_y - (ship_ring_outer_radius - ship_ring_thickness),
                                         center_x + (ship_ring_outer_radius - ship_ring_thickness), 
@@ -895,8 +916,7 @@ class BattleshipGUI(tk.Tk):
                                         center_x + miss_dot_radius, center_y + miss_dot_radius,
                                         fill='white', outline='white', tags="cells")
 
-                elif cell_char == 'X': # Hit
-                    
+                elif cell_char == 'X': # Hity
                     canvas.create_line(x0_rect + hit_x_padding, y0_rect + hit_x_padding,
                                         x1_rect - hit_x_padding, y1_rect - hit_x_padding,
                                         fill='#DC143C', width=3, tags="cells")
@@ -1018,7 +1038,7 @@ class BattleshipGUI(tk.Tk):
             self.chat_display.config(state=tk.DISABLED)
             self.chat_display.see(tk.END)
         else:
-            print(f"[LOG (Chat Display N/A) Type: {msg_type}]: {message}")
+            pass
 
 
     def _on_closing(self):
