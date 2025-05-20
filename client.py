@@ -611,7 +611,6 @@ class BattleshipGUI(tk.Tk):
             self.log_message("[DEBUG] Received heartbeat, sending ACK", msg_type="debug")
             if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')
         elif packet_type == PACKET_TYPE_CHAT:
-            preliminary_result_shown = False
             if "Would you like to place ships manually (M) or randomly (R)?" in payload_str:
                 self._prompt_manual_or_random_placement()
                 self.log_message(payload_str, msg_type="server_info")
@@ -633,31 +632,6 @@ class BattleshipGUI(tk.Tk):
             elif "already contains a ship" in payload_str:
                  self.log_message(f"[SERVER] {payload_str}", msg_type="placement_log")
                  self.selected_coord_label.config(text="Selected Start: Overlap!")
-
-            optimistic_update_performed = False
-            if self.awaiting_shot_result and self.last_fired_coord and not self.is_spectator:
-                stripped_payload = payload_str.strip()
-                shot_resolved = False
-
-                if stripped_payload.startswith("Hit") or \
-                   stripped_payload.startswith("You hit") or \
-                   ("sank" in stripped_payload.lower() and "you" in stripped_payload.lower()):
-                    self._apply_preliminary_shot_result(self.last_fired_coord, 'X')
-                    shot_resolved = True
-                    preliminary_result_shown = True
-                elif stripped_payload.startswith("Miss") or \
-                     stripped_payload.startswith("You missed"):
-                    self._apply_preliminary_shot_result(self.last_fired_coord, 'o')
-                    shot_resolved = True
-                    preliminary_result_shown = True
-                elif "already fired" in stripped_payload.lower() or \
-                     "invalid coordinate" in stripped_payload.lower() or \
-                     "not your turn" in stripped_payload.lower():
-                    shot_resolved = True 
-                
-                if shot_resolved:
-                    self.awaiting_shot_result = False
-                    self.last_fired_coord = None
 
             is_spectator_status_msg = False
             if self.is_spectator and "Player 1:" in payload_str and "Player 2:" in payload_str and "Game State:" in payload_str:
@@ -687,7 +661,7 @@ class BattleshipGUI(tk.Tk):
                 self.log_message(payload_str, msg_type="game_event")
                 is_spectator_status_msg = True
             
-            if not preliminary_result_shown and not is_spectator_status_msg:
+            if not is_spectator_status_msg:
                 is_placement_prompt = ("Would you like to place ships manually" in payload_str or
                                      ("Place your" in payload_str and "cells)." in payload_str) or
                                      "All ships have been placed" in payload_str or
@@ -710,10 +684,6 @@ class BattleshipGUI(tk.Tk):
                              self.log_message(f"{payload_str}", msg_type="info") 
                     else:
                         self.log_message(payload_str, msg_type="info") 
-
-            if self.awaiting_shot_result and self.username in payload_str and "your turn" in payload_str.lower():
-                self.awaiting_shot_result = False
-                self.last_fired_coord = None
 
         else:
             self.log_message(f"[DEBUG] Unhandled packet type: {get_packet_type_name(packet_type)}", msg_type="debug")
@@ -1048,63 +1018,6 @@ class BattleshipGUI(tk.Tk):
 
         if self.winfo_exists():
             self.destroy()
-
-    def _apply_preliminary_shot_result(self, coord_str, cell_char):
-        if not coord_str: return
-        self.log_message(f"[GUI] Trying to update {coord_str} to {cell_char} on opponent board.", msg_type="debug")
-        try:
-            row_char_upper = coord_str[0].upper()
-            if not ('A' <= row_char_upper <= 'J'):
-                self.log_message(f"[GUI FAIL] Invalid row char: {coord_str[0]}", msg_type="debug")
-                return
-
-            row = ord(row_char_upper) - ord('A')
-            col_str = coord_str[1:]
-            if not col_str.isdigit():
-                self.log_message(f"[GUI FAIL] Invalid col string: {col_str}", msg_type="debug")
-                return
-            col = int(col_str) - 1
-
-            if not (0 <= row < self.board_size and 0 <= col < self.board_size):
-                self.log_message(f"[GUI FAIL] Coord out of bounds: r{row} c{col}", msg_type="debug")
-                return
-        except Exception as e:
-            self.log_message(f"[GUI FAIL] Error parsing coord '{coord_str}': {e}", msg_type="debug")
-            return
-
-        canvas = self.opponent_board_canvas
-        grid_origin_x = self.cell_size
-        grid_origin_y = self.cell_size
-        base_dot_radius = self.cell_size * 0.15
-        miss_dot_radius = self.cell_size * 0.25
-        hit_x_padding = self.cell_size * 0.2
-        water_bg_color = "#4682B4"
-
-        x0_rect = grid_origin_x + col * self.cell_size
-        y0_rect = grid_origin_y + row * self.cell_size
-        x1_rect = x0_rect + self.cell_size
-        y1_rect = y0_rect + self.cell_size
-        center_x = x0_rect + self.cell_size / 2
-        center_y = y0_rect + self.cell_size / 2
-
-        canvas.create_rectangle(x0_rect, y0_rect, x1_rect, y1_rect, fill=water_bg_color, outline=water_bg_color, tags="cells")
-        canvas.create_oval(center_x - base_dot_radius, center_y - base_dot_radius,
-                            center_x + base_dot_radius, center_y + base_dot_radius,
-                            fill='#E0E0E0', outline='#E0E0E0', tags="cells")
-
-        if cell_char == 'X':
-            canvas.create_line(x0_rect + hit_x_padding, y0_rect + hit_x_padding,
-                                x1_rect - hit_x_padding, y1_rect - hit_x_padding,
-                                fill='#DC143C', width=3, tags="cells")
-            canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
-                                x1_rect - hit_x_padding, y0_rect + hit_x_padding,
-                                fill='#DC143C', width=3, tags="cells")
-            self.log_message(f"[GUI DRAW] Drew 'X' at {coord_str} (r{row},c{col})", msg_type="debug")
-        elif cell_char == 'o':
-            canvas.create_oval(center_x - miss_dot_radius, center_y - miss_dot_radius,
-                                center_x + miss_dot_radius, center_y + miss_dot_radius,
-                                fill='white', outline='white', tags="cells")
-            self.log_message(f"[GUI DRAW] Drew 'o' at {coord_str} (r{row},c{col})", msg_type="debug")
 
 
 # Dialog for Reconnection
