@@ -17,7 +17,7 @@ import queue
 import select
 import random
 import json
-from battleship import run_two_player_game
+from battleship import run_two_player_game, PlayerDisconnectedError
 from protocol import (
     receive_packet, send_packet, 
     PACKET_TYPE_USERNAME, PACKET_TYPE_MOVE, PACKET_TYPE_CHAT,
@@ -542,323 +542,263 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
     Manages multiple games in succession if players choose to play again.
     When this function returns, the connections will be closed.
     """
-    global game_in_progress, current_game_spectators, disconnected_players, current_game
+    global game_in_progress, current_game_spectators, disconnected_players, current_game, active_usernames
     
-    # Set socket timeouts for gameplay
-    player1_conn.settimeout(CONNECTION_TIMEOUT)
-    player2_conn.settimeout(CONNECTION_TIMEOUT)
-    
-    # Create protocol adapters
+    original_player1_conn = player1_conn # Keep track of original connections for rematch logic
+    original_player2_conn = player2_conn
+
     player1_adapter = ProtocolAdapter(player1_conn, player1_username)
     player2_adapter = ProtocolAdapter(player2_conn, player2_username)
     
-    # Avoiding circular imports - caused errors before
-    from battleship import Board, BOARD_SIZE
-    
-    # Keep track of player boards for reconnection
-    player1_board = None
-    player2_board = None
-    
+    game_id = f"{player1_username}_vs_{player2_username}_{int(time.time())}" # Unique ID for game session
+
     try:
         play_again = True
+        resumed_game_state = None
+
         while play_again:
-            # Run a single game
-            print("[INFO] Starting a new game between players...")
-            notify_spectators("A new game is starting!")
+            current_p1_board_state = None
+            current_p2_board_state = None
+            next_player_for_turn = None
             
-            # Update the current game object for spectators
-            current_game.game_state = "starting"
-            current_game.last_move = None
-            current_game.last_move_result = None
-            
-            # Send game start notification
-            send_packet(player1_conn, PACKET_TYPE_GAME_START, f"Starting game against {player2_username}")
-            send_packet(player2_conn, PACKET_TYPE_GAME_START, f"Starting game against {player1_username}")
-            
-            try:
-                # Create new board objects for this game 
-                player1_board = Board(BOARD_SIZE)
-                player2_board = Board(BOARD_SIZE)
-                
-                # Update the current game object for spectators
-                current_game.game_state = "setup"
-                
-                # Create a callback to update game state for spectators
-                def update_game_state_for_spectators(move, result):
-                    current_game.last_move = move
-                    current_game.last_move_result = result
-                    current_game.game_state = "in_progress"
-                    # Notify spectators with the update
-                    notify_spectators(f"Move: {move}, Result: {result}")
-                
-                # Run the game - create the board objects internally
-                run_two_player_game(player1_adapter, player1_adapter, player2_adapter, player2_adapter, 
-                                   notify_spectators_callback=notify_spectators)
-                                   
-                # Set game state to completed                   
-                current_game.game_state = "completed"
-                
-            except ConnectionResetError:
-                # Update game state
-                current_game.game_state = "interrupted"
-                
-                # Handle disconnection during gameplay
-                if player1_conn.fileno() == -1:  # Player 1 disconnected
-                    # Store player1's board and game state for potential reconnection
-                    with disconnected_players_lock:
-                        disconnected_players[player1_username] = {
-                            'disconnect_time': time.time(),
-                            'opponent_username': player2_username,
-                            'opponent_conn': player2_conn
-                        }
-                    
-                    handle_player_disconnect(player1_conn, player1_username)
-                    
-                    # Notify player2 about reconnection window
-                    try:
-                        send_packet(player2_conn, PACKET_TYPE_CHAT, 
-                                   f"\n{player1_username} has disconnected. Waiting {RECONNECT_TIMEOUT} seconds for reconnection...")
-                    except:
-                        pass
-                        
-                    notify_spectators(f"{player1_username} has disconnected. Waiting for reconnection...")
-                    
-                    # Wait for reconnection for RECONNECT_TIMEOUT seconds
-                    reconnection_wait_start = time.time()
-                    while time.time() - reconnection_wait_start < RECONNECT_TIMEOUT:
-                        # Check if player1 has reconnected
-                        with active_usernames_lock:
-                            reconnected = player1_username in active_usernames
-                            
-                        if reconnected:
-                            # Player has reconnected, update connection
-                            with active_usernames_lock:
-                                player1_conn = active_usernames[player1_username]
-                                player1_adapter.conn = player1_conn
-                                
-                            print(f"[INFO] {player1_username} reconnected. Continuing game.")
-                            send_packet(player2_conn, PACKET_TYPE_CHAT, f"{player1_username} has reconnected. Game continues.")
-                            notify_spectators(f"{player1_username} has reconnected. Game continues.")
-                            
-                            # Update game state 
-                            current_game.game_state = "in_progress"
-                            
-                            # Reset player's board from stored state
-                            with disconnected_players_lock:
-                                if player1_username in disconnected_players:
-                                    del disconnected_players[player1_username]
-                                    
-                            break
-                            
-                        time.sleep(1)
-                        
-                    # If still not reconnected after timeout, player2 wins
-                    with active_usernames_lock:
-                        reconnected = player1_username in active_usernames
-                        
-                    if not reconnected:
-                        current_game.game_state = "completed"
-                        current_game.last_move_result = f"{player2_username} wins by default"
-                        
-                        try:
-                            send_packet(player2_conn, PACKET_TYPE_CHAT, f"\n{player1_username} did not reconnect within the time limit. You win by default!")
-                        except:
-                            pass
-                        notify_spectators(f"{player1_username} did not reconnect within the time limit. {player2_username} wins by default!")
-                        break
-                        
-                else:  # Player 2 disconnected
-                    # Store player2's board and game state for potential reconnection
-                    with disconnected_players_lock:
-                        disconnected_players[player2_username] = {
-                            'disconnect_time': time.time(),
-                            'opponent_username': player1_username,
-                            'opponent_conn': player1_conn
-                        }
-                    
-                    handle_player_disconnect(player2_conn, player2_username)
-                    
-                    # Notify player1 about reconnection window
-                    try:
-                        send_packet(player1_conn, PACKET_TYPE_CHAT, 
-                                   f"\n{player2_username} has disconnected. Waiting {RECONNECT_TIMEOUT} seconds for reconnection...")
-                    except:
-                        pass
-                        
-                    notify_spectators(f"{player2_username} has disconnected. Waiting for reconnection...")
-                    
-                    # Wait for reconnection for RECONNECT_TIMEOUT seconds
-                    reconnection_wait_start = time.time()
-                    while time.time() - reconnection_wait_start < RECONNECT_TIMEOUT:
-                        # Check if player2 has reconnected
-                        with active_usernames_lock:
-                            reconnected = player2_username in active_usernames
-                            
-                        if reconnected:
-                            # Player has reconnected, update connection
-                            with active_usernames_lock:
-                                player2_conn = active_usernames[player2_username]
-                                player2_adapter.conn = player2_conn
-                                
-                            print(f"[INFO] {player2_username} reconnected. Continuing game.")
-                            send_packet(player1_conn, PACKET_TYPE_CHAT, f"{player2_username} has reconnected. Game continues.")
-                            notify_spectators(f"{player2_username} has reconnected. Game continues.")
-                            
-                            # Reset player's board from stored state
-                            with disconnected_players_lock:
-                                if player2_username in disconnected_players:
-                                    del disconnected_players[player2_username]
-                                    
-                            break
-                            
-                        time.sleep(1)
-                        
-                    # If still not reconnected after timeout, player1 wins
-                    with active_usernames_lock:
-                        reconnected = player2_username in active_usernames
-                        
-                    if not reconnected:
-                        current_game.game_state = "completed"
-                        current_game.last_move_result = f"{player1_username} wins by default"
-                        
-                        try:
-                            send_packet(player1_conn, PACKET_TYPE_CHAT, f"\n{player2_username} did not reconnect within the time limit. You win by default!")
-                        except:
-                            pass
-                        notify_spectators(f"{player2_username} did not reconnect within the time limit. {player1_username} wins by default!")
-                        break
-                        
-            except BrokenPipeError:
-                # Similar logic to ConnectionResetError - handle as disconnection
-                if player1_conn.fileno() == -1:
-                    handle_player_disconnect(player1_conn, player1_username)
+            game_ended_due_to_disconnect = False
+
+            if resumed_game_state:
+                print(f"[GAME SESSION {game_id}] Attempting to resume game.")
+                p1_state = resumed_game_state.get('player1_board_state')
+                p2_state = resumed_game_state.get('player2_board_state')
+                next_player = resumed_game_state.get('next_turn_username')
+
+                # Map the board states based on player1_username and player2_username
+                if resumed_game_state.get('player1_of_state') == player1_username:
+                    current_p1_board_state = p1_state
+                    current_p2_board_state = p2_state
                 else:
-                    handle_player_disconnect(player2_conn, player2_username)
-                break
-            except socket.timeout:
-                # Handle timeout during gameplay
-                print("[ERROR] Game session timed out")
-                try:
-                    send_packet(player1_conn, PACKET_TYPE_ERROR, "Game session timed out. Disconnecting...")
-                except:
-                    pass
-                try:
-                    send_packet(player2_conn, PACKET_TYPE_ERROR, "Game session timed out. Disconnecting...")
-                except:
-                    pass
-                notify_spectators("Game session timed out. Game ending.")
-                break
-            except Exception as e:
-                print(f"[ERROR] Unexpected error during gameplay: {e}")
-                traceback.print_exc()
-                notify_spectators(f"Game ended due to an error: {e}")
-                break
-            
-            # Add a small delay to let players see the final result
-            try:
-                send_packet(player1_conn, PACKET_TYPE_CHAT, "Game over! Please wait...")
-                send_packet(player2_conn, PACKET_TYPE_CHAT, "Game over! Please wait...")
-                notify_spectators("Game over! Waiting for players to decide if they want to play again...")
-            except:
-                break
-            
-            # Add a delay to ensure players can see the final results
-            time.sleep(3)  # 3 second delay
-            
-            # Ask players if they want to play again
-            try:
-                player1_wants_rematch = ask_play_again(player1_conn)
-                player2_wants_rematch = ask_play_again(player2_conn)
-            except:
-                break
-            
-            # Only continue if both players want to play again
-            if player1_wants_rematch and player2_wants_rematch:
-                try:
-                    send_packet(player1_conn, PACKET_TYPE_CHAT, "Both players have agreed to play again. Starting a new game...")
-                    send_packet(player2_conn, PACKET_TYPE_CHAT, "Both players have agreed to play again. Starting a new game...")
-                    notify_spectators("Both players have agreed to play again. Starting a new game...")
-                    play_again = True
-                except:
-                    break
+                    current_p1_board_state = p2_state
+                    current_p2_board_state = p1_state
+                
+                next_player_for_turn = next_player
+                
+                with active_usernames_lock:
+                    if player1_username in active_usernames:
+                        player1_adapter.conn = active_usernames[player1_username]
+                    if player2_username in active_usernames:
+                        player2_adapter.conn = active_usernames[player2_username]
+                
+                resumed_game_state = None
             else:
-                # Inform players of the decision
+                print(f"[GAME SESSION {game_id}] Starting a new game instance.")
+                current_game.game_state = "starting"
+                current_game.last_move = None
+                current_game.last_move_result = None
+                send_packet(player1_adapter.conn, PACKET_TYPE_GAME_START, f"Starting game against {player2_username}")
+                send_packet(player2_adapter.conn, PACKET_TYPE_GAME_START, f"Starting game against {player1_username}")
+                notify_spectators("A new game is starting!")
+
+            try:
+                run_two_player_game(
+                    player1_adapter, player1_adapter, player2_adapter, player2_adapter,
+                    notify_spectators,
+                    player1_username=player1_username, player2_username=player2_username,
+                    initial_player1_board_state=current_p1_board_state,
+                    initial_player2_board_state=current_p2_board_state,
+                    initial_current_player_name=next_player_for_turn
+                )
+                current_game.game_state = "completed"
+
+            except PlayerDisconnectedError as pde:
+                game_ended_due_to_disconnect = True
+                print(f"[GAME SESSION {game_id}] PlayerDisconnectedError: {pde.player_name} disconnected.")
+                
+                disconnected_player_name = pde.player_name
+                other_player_name = player2_username if disconnected_player_name == player1_username else player1_username
+                other_player_adapter = player2_adapter if disconnected_player_name == player1_username else player1_adapter
+                
+                saved_state = {
+                    'player1_of_state': player1_username,
+                    'player2_of_state': player2_username,
+                    'player1_board_state': pde.game_state['player1_board_state'],
+                    'player2_board_state': pde.game_state['player2_board_state'],
+                    'next_turn_username': pde.game_state['next_turn_username']
+                }
+
+                with disconnected_players_lock:
+                    disconnected_players[disconnected_player_name] = {
+                        'disconnect_time': time.time(),
+                        'opponent_username': other_player_name,
+                        'game_id': game_id,
+                        'game_state': saved_state
+                    }
+                print(f"[GAME SESSION {game_id}] Saved game state for {disconnected_player_name}.")
+
+                # Notify the other player and spectators
+                msg_for_other = f"\n{disconnected_player_name} has disconnected. Waiting {RECONNECT_TIMEOUT} seconds for reconnection..."
+                msg_for_spectators = f"{disconnected_player_name} has disconnected. Waiting for reconnection..."
                 try:
-                    if not player1_wants_rematch:
-                        send_packet(player1_conn, PACKET_TYPE_CHAT, "You declined to play again. Ending session.")
-                        send_packet(player2_conn, PACKET_TYPE_CHAT, "The other player declined to play again. Ending session.")
-                        notify_spectators(f"{player1_username} declined to play again. Game ending.")
-                    elif not player2_wants_rematch:
-                        send_packet(player2_conn, PACKET_TYPE_CHAT, "You declined to play again. Ending session.")
-                        send_packet(player1_conn, PACKET_TYPE_CHAT, "The other player declined to play again. Ending session.")
-                        notify_spectators(f"{player2_username} declined to play again. Game ending.")
+                    send_packet(other_player_adapter.conn, PACKET_TYPE_CHAT, msg_for_other)
+                except Exception as e:
+                    print(f"[GAME SESSION {game_id}] Error notifying {other_player_name} of disconnect: {e}")
+                notify_spectators(msg_for_spectators)
+                current_game.game_state = "interrupted_waiting_reconnect"
+
+                # Reconnection wait loop
+                reconnected_successfully = False
+                wait_start_time = time.time()
+                while time.time() - wait_start_time < RECONNECT_TIMEOUT:
+                    with active_usernames_lock:
+                        if disconnected_player_name in active_usernames:
+                            print(f"[GAME SESSION {game_id}] {disconnected_player_name} appears in active_usernames. Attempting to resume.")
+                            
+                            # Retrieve their saved state for this game
+                            with disconnected_players_lock:
+                                if disconnected_player_name in disconnected_players and \
+                                   disconnected_players[disconnected_player_name].get('game_id') == game_id:
+                                    
+                                    resumed_game_state = disconnected_players[disconnected_player_name]['game_state']
+                                    del disconnected_players[disconnected_player_name]
+                                    reconnected_successfully = True
+                                    print(f"[GAME SESSION {game_id}] State retrieved for {disconnected_player_name}. Will resume game.")
+                                else:
+                                    print(f"[GAME SESSION {game_id}] {disconnected_player_name} reconnected, but no/mismatching game state found. Cannot resume this game.")
+                                    reconnected_successfully = False
+                            break 
+                    
+                    # Notify waiting player occasionally
+                    if int(time.time() - wait_start_time) % 10 == 0:
+                        try:
+                            send_packet(other_player_adapter.conn, PACKET_TYPE_CHAT, f"Still waiting for {disconnected_player_name} to reconnect... ({int(RECONNECT_TIMEOUT - (time.time() - wait_start_time))}s left)")
+                        except: pass
+                    time.sleep(1)
+
+                if reconnected_successfully:
+                    send_packet(other_player_adapter.conn, PACKET_TYPE_CHAT, f"{disconnected_player_name} has reconnected. Resuming game.")
+                    notify_spectators(f"{disconnected_player_name} has reconnected. Resuming game.")
+                    with active_usernames_lock:
+                        new_conn_for_reconnected = active_usernames[disconnected_player_name]
+                    if disconnected_player_name == player1_username:
+                        player1_adapter.conn = new_conn_for_reconnected
+                        send_packet(player1_adapter.conn, PACKET_TYPE_RECONNECT, "Successfully reconnected to your game.")
                     else:
-                        send_packet(player1_conn, PACKET_TYPE_CHAT, "Session ending due to an unexpected error.")
-                        send_packet(player2_conn, PACKET_TYPE_CHAT, "Session ending due to an unexpected error.")
-                        notify_spectators("Game ending due to an unexpected error.")
-                except:
-                    pass
-                play_again = False
-        
-        # Game session ended by player choice
-        try:
-            send_packet(player1_conn, PACKET_TYPE_GAME_END, "Thank you for playing! Disconnecting now.")
-            send_packet(player2_conn, PACKET_TYPE_GAME_END, "Thank you for playing! Disconnecting now.")
-            notify_spectators("Game has ended. Thank you for spectating!")
-        except:
-            pass
-        print(f"[INFO] Game session ended between players at {player1_addr} and {player2_addr}")
-    
-    except socket.timeout:
-        handle_player_disconnect(player1_conn, player1_username)
-        handle_player_disconnect(player2_conn, player2_username)
-        notify_spectators("Game ended due to a timeout.")
-    except ConnectionResetError:
-        handle_player_disconnect(player1_conn, player1_username)
-        handle_player_disconnect(player2_conn, player2_username)
-        notify_spectators("Game ended due to a connection reset.")
-    except BrokenPipeError:
-        handle_player_disconnect(player1_conn, player1_username)
-        handle_player_disconnect(player2_conn, player2_username)
-        notify_spectators("Game ended due to a broken connection.")
+                        player2_adapter.conn = new_conn_for_reconnected
+                        send_packet(player2_adapter.conn, PACKET_TYPE_RECONNECT, "Successfully reconnected to your game.")
+                    current_game.game_state = "in_progress"
+                    continue
+
+                else: # Did not reconnect in time
+                    print(f"[GAME SESSION {game_id}] {disconnected_player_name} did not reconnect. {other_player_name} wins by default.")
+                    current_game.game_state = "completed_by_forfeit"
+                    current_game.last_move_result = f"{other_player_name} wins by default (opponent disconnect)."
+                    try:
+                        send_packet(other_player_adapter.conn, PACKET_TYPE_GAME_END, f"{disconnected_player_name} did not reconnect. You win by default!")
+                    except Exception as e:
+                         print(f"[GAME SESSION {game_id}] Error notifying {other_player_name} of win by default: {e}")
+                    notify_spectators(f"{disconnected_player_name} did not reconnect. {other_player_name} wins by default.")
+                    play_again = False
+                    break
+
+            if not game_ended_due_to_disconnect:
+                print(f"[GAME SESSION {game_id}] Game instance finished normally.")
+                send_packet(player1_adapter.conn, PACKET_TYPE_CHAT, "Game over! Please wait...")
+                send_packet(player2_adapter.conn, PACKET_TYPE_CHAT, "Game over! Please wait...")
+                time.sleep(2)
+
+                player1_wants_rematch = ask_play_again(player1_adapter.conn)
+                player2_wants_rematch = ask_play_again(player2_adapter.conn)
+
+                if player1_wants_rematch and player2_wants_rematch:
+                    send_packet(player1_adapter.conn, PACKET_TYPE_CHAT, "Both players want a rematch! Starting new game...")
+                    send_packet(player2_adapter.conn, PACKET_TYPE_CHAT, "Both players want a rematch! Starting new game...")
+                    notify_spectators("Players agreed to a rematch!")
+                    play_again = True
+                else:
+                    play_again = False
+                    if not player1_wants_rematch:
+                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
+                        notify_spectators(f"{player1_username} declined a rematch.")
+                    elif not player2_wants_rematch:
+                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
+                        notify_spectators(f"{player2_username} declined a rematch.")
+                    break
+
+        if not play_again:
+            print(f"[GAME SESSION {game_id}] Session ended.")
+            try:
+                if not game_ended_due_to_disconnect:
+                    send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
+                    send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
+            except: pass
+            notify_spectators("Game session has concluded.")
+
     except Exception as e:
-        print(f"[ERROR] Game error: {e}\n{traceback.format_exc()}")
-        handle_player_disconnect(player1_conn, player1_username)
-        handle_player_disconnect(player2_conn, player2_username)
-        notify_spectators(f"Game ended due to an error: {e}")
+        print(f"[FATAL ERROR in GAME SESSION {game_id}] Error: {e}\n{traceback.format_exc()}")
+        try: send_packet(player1_adapter.conn, PACKET_TYPE_ERROR, "A fatal server error occurred. Game ending.")
+        except: pass
+        try: send_packet(player2_adapter.conn, PACKET_TYPE_ERROR, "A fatal server error occurred. Game ending.")
+        except: pass
+        notify_spectators(f"Game session ended due to a server error: {e}")
     finally:
-        # Clean up player data
+        print(f"[GAME SESSION {game_id}] Cleaning up session.")
         with active_usernames_lock:
-            if player1_username in active_usernames and active_usernames[player1_username] == player1_conn:
+            if player1_username in active_usernames and active_usernames[player1_username] == player1_adapter.conn:
                 del active_usernames[player1_username]
-                print(f"[INFO] Cleaned up {player1_username} from active usernames")
-            if player2_username in active_usernames and active_usernames[player2_username] == player2_conn:
+            if player2_username in active_usernames and active_usernames[player2_username] == player2_adapter.conn:
                 del active_usernames[player2_username]
-                print(f"[INFO] Cleaned up {player2_username} from active usernames")
         
         with disconnected_players_lock:
-            if player1_username in disconnected_players:
+            if player1_username in disconnected_players and disconnected_players[player1_username].get('game_id') == game_id:
                 del disconnected_players[player1_username]
-                print(f"[INFO] Cleaned up {player1_username} from disconnected players")
-            if player2_username in disconnected_players:
+            if player2_username in disconnected_players and disconnected_players[player2_username].get('game_id') == game_id:
                 del disconnected_players[player2_username]
-                print(f"[INFO] Cleaned up {player2_username} from disconnected players")
         
-        # Ensure connections are closed properly
-        try:
-            player1_conn.close()
-            player2_conn.close()
-            print("[INFO] Client connections closed. Ready for new players.")
-        except:
-            pass
+        try: player1_adapter.conn.close()
+        except: pass
+        try: player2_adapter.conn.close()
+        except: pass
         
-        # Clear spectators list
-        with spectators_lock:
-            current_game_spectators.clear()
-        
-        # Mark game as ended
         with game_lock:
             game_in_progress = False
+        current_game = DummyGame()
+        print(f"[INFO] Game session {game_id} fully concluded. Server ready for new players or waiting players.")
+
+def handle_reconnection(conn, addr, username):
+    """
+    Handle a player reconnection attempt. Validates if eligible, updates active_usernames.
+    Returns True if basic reconnection checks pass (eligible and active_usernames updated), False otherwise.
+    Actual game state restoration happens in handle_game_session.
+    """
+    print(f"[RECONNECTION] Attempt for {username} from {addr}")
+    with disconnected_players_lock:
+        if username not in disconnected_players:
+            print(f"[RECONNECTION] {username} not in disconnected_players list.")
+            send_packet(conn, PACKET_TYPE_ERROR, "No prior disconnected game session found for your username.")
+            return False
+            
+        player_data = disconnected_players[username]
+        disconnect_time = player_data['disconnect_time']
+        
+        if time.time() - disconnect_time > RECONNECT_TIMEOUT:
+            print(f"[RECONNECTION] {username} window expired. Removing from disconnected_players.")
+            send_packet(conn, PACKET_TYPE_ERROR, f"Reconnection window expired.")
+            del disconnected_players[username]
+            return False
+
+    # If eligible, update active_usernames with the new connection
+    with active_usernames_lock:
+        if username in active_usernames:
+            print(f"[RECONNECTION] {username} was already in active_usernames. Closing old connection.")
+            try:
+                old_conn = active_usernames[username]
+                if old_conn != conn:
+                    send_packet(old_conn, PACKET_TYPE_ERROR, "Another client reconnected with your username. Closing this old session.")
+                    old_conn.close()
+            except Exception as e:
+                print(f"[RECONNECTION] Error closing old conn for {username}: {e}")
+        active_usernames[username] = conn 
+        print(f"[RECONNECTION] {username} from {addr} updated in active_usernames with new connection.")
+
+    return True
 
 def run_game_server():
     """
@@ -871,7 +811,7 @@ def run_game_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
-        server_socket.listen(5)  # Allow more pending connections for waiting lobby
+        server_socket.listen(5)
         
         while True:
             try:
@@ -914,10 +854,8 @@ def run_game_server():
                         # Handle reconnection
                         print(f"[INFO] {username} is attempting to reconnect")
                         if handle_reconnection(conn, addr, username):
-                            # Reconnection successful, continue to next connection
                             continue
                         else:
-                            # Failed to reconnect, close connection
                             try:
                                 send_packet(conn, PACKET_TYPE_ERROR, "Failed to reconnect to game session.")
                             except:
@@ -958,7 +896,6 @@ def run_game_server():
                                 # Start game with these two players
                                 game_in_progress = True
                                 
-                                # Update the global current_game object
                                 current_game = RealGame(player1_username, username)
                                 
                                 threading.Thread(target=handle_game_session, 
@@ -1058,55 +995,6 @@ def check_username_available(username):
     
     print(f"[DEBUG] '{username}' is available")
     return (True, None)
-
-def handle_reconnection(conn, addr, username):
-    """
-    Handle a player reconnection attempt.
-    """
-    print(f"[DEBUG] Handling reconnection attempt for {username} from {addr}")
-    
-    with disconnected_players_lock:
-        # If the player is not in the disconnected list, can't reconnect
-        if username not in disconnected_players:
-            print(f"[WARNING] {username} tried to reconnect but was not found in disconnected players")
-            send_packet(conn, PACKET_TYPE_ERROR, "No active game found for reconnection.")
-            return False
-            
-        player_data = disconnected_players[username]
-        disconnect_time = player_data['disconnect_time']
-        current_time = time.time()
-        
-        # Check if reconnection window has expired
-        elapsed = current_time - disconnect_time
-        if elapsed > RECONNECT_TIMEOUT:
-            print(f"[WARNING] {username} reconnection window expired ({elapsed:.1f} seconds > {RECONNECT_TIMEOUT}s)")
-            send_packet(conn, PACKET_TYPE_ERROR, f"Reconnection window expired ({RECONNECT_TIMEOUT} seconds).")
-            del disconnected_players[username]
-            return False
-            
-        print(f"[INFO] {username} successfully reconnected to their game after {elapsed:.1f}s")
-        
-        # Add to active usernames
-        with active_usernames_lock:
-            if username in active_usernames:
-                print(f"[WARNING] {username} was already in active_usernames during reconnection!")
-                # Close the old connection if it exists
-                try:
-                    old_conn = active_usernames[username]
-                    send_packet(old_conn, PACKET_TYPE_ERROR, "Another client has reconnected with your username.")
-                    old_conn.close()
-                except:
-                    pass
-            active_usernames[username] = conn
-            print(f"[DEBUG] Added {username} back to active_usernames")
-            
-        # Send welcome back message
-        send_packet(conn, PACKET_TYPE_RECONNECT, "Successfully reconnected to your game.")
-        
-        # Remove from disconnected players after successful reconnection
-        del disconnected_players[username]
-        
-        return True
 
 if __name__ == "__main__":
     main()

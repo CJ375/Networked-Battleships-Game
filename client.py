@@ -158,19 +158,18 @@ class BattleshipGUI(tk.Tk):
         self.current_ship_name = ""
         self.current_ship_length = 0
         self.selected_placement_coord = None # e.g., "A1"
-        self.placement_orientation_var = tk.StringVar(value="H") # Default to horizontal
+        self.placement_orientation_var = tk.StringVar(value="H")
 
         self._setup_ui()
         self._prompt_for_username_and_connect()
         
-        # Add a protocol to handle window close
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _setup_ui(self):
         main_frame = tk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Create for game area and chat area
+        # Create window for game area and chat area
         self.paned_window = tk.PanedWindow(main_frame, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=5)
         self.paned_window.pack(fill=tk.BOTH, expand=True)
 
@@ -227,18 +226,18 @@ class BattleshipGUI(tk.Tk):
         self.confirm_placement_button = tk.Button(self.placement_frame, text="Confirm Ship Placement", command=self._confirm_ship_placement_action)
         self.confirm_placement_button.pack(pady=5)
 
-        # Draw grid lines on canvases
+        # Draw grid lines
         self.draw_grid_lines(self.player_board_canvas)
         self.draw_grid_lines(self.opponent_board_canvas)
         
         self.chat_area_frame = tk.Frame(self.paned_window, relief=tk.SUNKEN, borderwidth=1)
-        self.paned_window.add(self.chat_area_frame, minsize=250) # Min width for chat area
+        self.paned_window.add(self.chat_area_frame, minsize=250)
 
         # Chat/Log display
         self.chat_display = scrolledtext.ScrolledText(self.chat_area_frame, height=10, state=tk.DISABLED, wrap=tk.WORD)
         self.chat_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Define tags for message styling
+        # Message styling
         self.chat_display.tag_configure("timestamp", foreground="#888888", font=("Helvetica", 8))
         self.chat_display.tag_configure("self_msg_sender", foreground="blue", font=("Helvetica", 9, "bold"))
         self.chat_display.tag_configure("self_msg_text", foreground="blue")

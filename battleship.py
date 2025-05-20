@@ -25,6 +25,14 @@ SHIPS = [
 # Define a constant for move timeout to match with server
 MOVE_TIMEOUT = 30  # seconds a player has to make a move
 
+# Custom exception for any player disconnects
+class PlayerDisconnectedError(Exception):
+    def __init__(self, player_name, game_state):
+        self.player_name = player_name
+        self.game_state = game_state # {'board1_state': ..., 'board2_state': ..., 'next_turn_username': ...}
+        super().__init__(f"Player {player_name} disconnected.")
+
+
 class Board:
     """
     Represents a single Battleship board with hidden ships.
@@ -244,6 +252,43 @@ class Board:
                 row_str += grid_to_print[r][c].center(3)
             print(f"{row_label}  {row_str}")
 
+    def serialize(self):
+        """Return a dictionary representing the board's state."""
+        # Convert sets of tuples to lists of lists for JSON compatibility
+        serialized_placed_ships = []
+        for ship in self.placed_ships:
+            serialized_ship = {
+                'name': ship['name'],
+                'positions': [list(pos) for pos in ship['positions']]
+            }
+            serialized_placed_ships.append(serialized_ship)
+
+        return {
+            'size': self.size,
+            'hidden_grid': self.hidden_grid,
+            'display_grid': self.display_grid,
+            'placed_ships': serialized_placed_ships
+        }
+
+    @classmethod
+    def deserialize(cls, data):
+        """Create a Board instance from a serialized dictionary."""
+        board_size = data.get('size', BOARD_SIZE)
+        board = cls(board_size)
+        board.hidden_grid = data['hidden_grid']
+        board.display_grid = data['display_grid']
+        
+        deserialized_placed_ships = []
+        for ship_data in data['placed_ships']:
+            deserialized_ship = {
+                'name': ship_data['name'],
+                'positions': {tuple(pos) for pos in ship_data['positions']}
+            }
+            deserialized_placed_ships.append(deserialized_ship)
+        board.placed_ships = deserialized_placed_ships
+        
+        return board
+
 
 def parse_coordinate(coord_str):
     """
@@ -252,29 +297,25 @@ def parse_coordinate(coord_str):
     coord_str = coord_str.strip().upper()
     print(BOARD_SIZE)
     
-    # Check if the input is empty
     if not coord_str:
         raise ValueError("Coordinate cannot be empty")
     
-    # Check if first character is a letter
     if not coord_str[0].isalpha():
         raise ValueError("Coordinate must start with a letter (A-J)")
     
-    # Check if there are digits after the letter
     if len(coord_str) < 2 or not coord_str[1:].isdigit():
         raise ValueError("Coordinate must have a number after the letter")
     
     row_letter = coord_str[0]
     col_digits = coord_str[1:]
     
-    # Validate the column number before converting
     col_num = int(col_digits)
     if col_num < 1 or col_num > BOARD_SIZE:
         raise ValueError(f"Column must be a number between 1 and {BOARD_SIZE}")
     
     # Convert to row, col indices
     row = ord(row_letter) - ord('A')
-    col = col_num - 1  # zero-based
+    col = col_num - 1
     
     # Check if the row is in range (A-J for a 10x10 board)
     if row < 0 or row >= BOARD_SIZE:
@@ -402,30 +443,51 @@ def run_single_player_game_online(rfile, wfile):
             send(f"Invalid input: {e}")
 
 
-def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile, notify_spectators_callback):
+def recv_from_player_with_timeout(player_rfile, timeout_secs, player_name_for_error="Player"):
     """
-    Run a two-player Battleship game with I/O redirected to socket file objects.
-    Each player takes turns firing at their opponent's board.
-    Includes a timeout mechanism to handle inactive players.
+    Receive input from a player with a timeout.
+    Returns the input string or raises PlayerDisconnectedError if timeout/error occurs.
     
-    Expects:
-      - player1_rfile/player1_wfile: File-like objects or protocol adapters for player1
-      - player2_rfile/player2_wfile: File-like objects or protocol adapters for player2
-      - notify_spectators_callback: A function to call to send messages to spectators
+    Works with both file-like objects and protocol adapters.
     """
-    # Existing send_to_player and send_board_to_player functions remain the same
-    # as they now work with either file objects or our protocol adapters
-    
-    # Create spectator notification wrapper function that works with both
-    # old text protocol and new binary protocol
-    def notify_spectators_wrapper(message):
-        """
-        Wrapper around notify_spectators_callback to handle protocol conversion if needed.
-        """
-        # Call the provided spectator notification callback
-        notify_spectators_callback(message)
-    
-    # Timeout settings are defined at the module level
+    try:
+        if not hasattr(player_rfile, 'fileno'):
+            response = player_rfile.readline().strip()
+            if response:
+                return response
+            else:
+                raise PlayerDisconnectedError(player_name_for_error, None)
+
+        fd = player_rfile.fileno()
+        ready, _, _ = select.select([fd], [], [], timeout_secs)
+        if ready:
+            line = player_rfile.readline()
+            if not line:
+                raise PlayerDisconnectedError(player_name_for_error, None)
+            return line.strip()
+        else:
+            # Timeout occurred
+            raise PlayerDisconnectedError(player_name_for_error, None)
+    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+        print(f"Connection error receiving from {player_name_for_error}: {e}")
+        raise PlayerDisconnectedError(player_name_for_error, None)
+    except PlayerDisconnectedError:
+        raise
+    except Exception as e:
+        print(f"Unexpected error receiving from {player_name_for_error}: {e}")
+        raise PlayerDisconnectedError(player_name_for_error, None)
+
+
+def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfile, 
+                        notify_spectators_callback,
+                        player1_username="Player 1", player2_username="Player 2",
+                        initial_player1_board_state=None, 
+                        initial_player2_board_state=None,
+                        initial_current_player_name=None):
+    """
+    Run a two-player Battleship game. Can start fresh or resume from a state.
+    Returns a game state dictionary if a player disconnects, otherwise None (normal game end).
+    """
     
     def send_to_player(player_wfile, msg):
         try:
@@ -433,10 +495,10 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             player_wfile.flush()
         except Exception as e:
             print(f"Error sending to player: {e}")
-    
+
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
         try:
-            # First send player's own board (with ships visible)
+            # Send player's own board (with ships visible)
             player_wfile.write("Your Grid:\n")
             
             # Column headers
@@ -456,7 +518,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             player_wfile.write('\n')
             player_wfile.flush()
             
-            # Then send opponent's board (only hits/misses visible) if provided
+            # Send opponent's board (only hits/misses visible) if provided
             if opponent_board:
                 player_wfile.write("Opponent's Grid:\n")
                 
@@ -480,186 +542,122 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         except Exception as e:
             print(f"Error sending board to player: {e}")
 
-    def send_board_to_spectators(player1_board, player2_board, notify_spectators_callback_func):
-        """
-        Send both players' boards to spectators.
-        Spectators see both boards with ships hidden.
-        """
+    def send_board_to_spectators(p1_board_obj, p2_board_obj, notify_callback_func):
         try:
-            # Prepare the board data as a single formatted string
             board_data = []
             board_data.append("SPECTATOR_GRID\n")
             
-            # Add Player 1's board
-            board_data.append("Player 1's Board:\n")
-            
-            # Column headers
+            # Add Player 1's board 
+            board_data.append(f"{player1_username}'s Grid:\n")
             header = "   "
-            for i in range(player1_board.size):
+            for i in range(p1_board_obj.size):
                 header += f"{i+1}".center(3)
             board_data.append(header + "\n")
-            
-            for r in range(player1_board.size):
+            for r in range(p1_board_obj.size):
                 row_label = chr(ord('A') + r)
                 row_str = ""
-                for c in range(player1_board.size):
-                    row_str += player1_board.display_grid[r][c].center(3)
+                for c in range(p1_board_obj.size):
+                    row_str += p1_board_obj.display_grid[r][c].center(3)
                 board_data.append(f"{row_label}  {row_str}\n")
             board_data.append("\n")
             
-            # Add Player 2's board
-            board_data.append("Player 2's Board:\n")
-            
-            # Column headers
+            # Add Player 2's board 
+            board_data.append(f"{player2_username}'s Grid:\n")
             header = "   "
-            for i in range(player2_board.size):
+            for i in range(p2_board_obj.size):
                 header += f"{i+1}".center(3)
             board_data.append(header + "\n")
-            
-            for r in range(player2_board.size):
+            for r in range(p2_board_obj.size):
                 row_label = chr(ord('A') + r)
                 row_str = ""
-                for c in range(player2_board.size):
-                    row_str += player2_board.display_grid[r][c].center(3)
+                for c in range(p2_board_obj.size):
+                    row_str += p2_board_obj.display_grid[r][c].center(3)
                 board_data.append(f"{row_label}  {row_str}\n")
             board_data.append("\n")
             
-            # Send the combined board data
-            notify_spectators_callback_func("".join(board_data))
+            notify_callback_func("".join(board_data))
         except Exception as e:
             print(f"Error sending board to spectators: {e}")
-
-    def recv_from_player_with_timeout(player_rfile, timeout_secs):
-        """
-        Receive input from a player with a timeout.
-        Returns the input string or None if timeout occurs.
-        
-        Works with both file-like objects and protocol adapters.
-        """
-        max_attempts = 3
-        attempt = 0
-        
-        try:
-            # If player_rfile is a protocol adapter (has no fileno method), use its readline method
-            if not hasattr(player_rfile, 'fileno'):
-                while attempt < max_attempts:
-                    response = player_rfile.readline().strip()
-                    # Handle empty responses - this happens when the adapter receives
-                    # a packet that doesn't translate to a valid game input
-                    if response:
-                        return response
-                    
-                    time.sleep(0.1)
-                    attempt += 1
-                
-                return None
             
-            fd = player_rfile.fileno()
-            # Wait for the file descriptor to be ready for reading
-            ready, _, _ = select.select([fd], [], [], timeout_secs)
-            if ready:
-                # Data is available, read it
-                return player_rfile.readline().strip()
-            else:
-                # Timeout occurred
-                return None
-        except Exception as e:
-            print(f"Error receiving from player: {e}")
-            return None
-    
-    def handle_ship_placement(player_rfile, player_wfile, player_board, player_name):
-        """
-        Handle the ship placement phase for a player.
-        Returns True if ships were placed successfully (manually or randomly), False if player quit.
-        """
-        send_to_player(player_wfile, f"{player_name}, it's time to place your ships!")
+    def handle_ship_placement(player_rfile, player_wfile, player_board_obj, p_name):
+        send_to_player(player_wfile, f"{p_name}, it's time to place your ships!")
         send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
         
-        choice = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
-        
-        # If timeout or no input, default to random placement
+        choice = None
+        try:
+            choice = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT, p_name)
+        except PlayerDisconnectedError:
+            raise
+
         if choice is None:
             send_to_player(player_wfile, "No selection made within timeout period. Ships will be placed randomly.")
-            player_board.place_ships_randomly(SHIPS)
+            player_board_obj.place_ships_randomly(SHIPS)
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
-            send_board_to_player(player_wfile, player_board)
+            send_board_to_player(player_wfile, player_board_obj)
             return True
 
         choice = choice.upper()[0] if choice else ""
         
         if choice == 'M':
-            # Manual placement
             for ship_name, ship_size in SHIPS:
                 placed = False
                 while not placed:
-                    # Show current board state
-                    send_board_to_player(player_wfile, player_board)
+                    send_board_to_player(player_wfile, player_board_obj) 
                     send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
                     send_to_player(player_wfile, "Enter starting coordinate and orientation (e.g. A1 H or B2 V):")
-                    combined_input = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT)
                     
-                    # Check for timeout or quit command
+                    combined_input = None
+                    try:
+                        combined_input = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT, p_name)
+                    except PlayerDisconnectedError:
+                        raise
+
                     if combined_input is None:
                         send_to_player(player_wfile, f"Timeout waiting for input. {ship_name} will be placed randomly.")
-                        randomly_place_single_ship(player_board, ship_name, ship_size)
+                        randomly_place_single_ship(player_board_obj, ship_name, ship_size)
                         send_to_player(player_wfile, f"{ship_name} placed randomly.")
                         placed = True
                         continue
                     elif combined_input.lower() == 'quit':
-                        return False
-                    
+                        raise PlayerDisconnectedError(p_name, None)
+
                     try:
                         parts = combined_input.strip().upper().split()
                         if len(parts) != 2:
                             send_to_player(player_wfile, "Invalid format. Expected coordinate and orientation (e.g., A1 H).")
                             continue
                         
-                        coord_str = parts[0]
-                        orientation_char = parts[1]
+                        coord_str, orientation_char = parts[0], parts[1]
+                        row, col = parse_coordinate(coord_str)
+                        orientation_enum = 0 if orientation_char == 'H' else (1 if orientation_char == 'V' else -1)
 
-                        row, col = parse_coordinate(coord_str) # parse_coordinate only takes coord_str
-                        
-                        # Convert orientation_char to 0 (horizontal) or 1 (vertical)
-                        if orientation_char == 'H':
-                            orientation_enum = 0
-                        elif orientation_char == 'V':
-                            orientation_enum = 1
-                        else:
-                            send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V' after the coordinate.")
+                        if orientation_enum == -1:
+                            send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
                             continue
                         
-                        if player_board.can_place_ship(row, col, ship_size, orientation_enum):
-                            occupied_positions = player_board.do_place_ship(row, col, ship_size, orientation_enum)
-                            player_board.placed_ships.append({
-                                'name': ship_name,
-                                'positions': occupied_positions
-                            })
+                        if player_board_obj.can_place_ship(row, col, ship_size, orientation_enum):
+                            occupied_positions = player_board_obj.do_place_ship(row, col, ship_size, orientation_enum)
+                            player_board_obj.placed_ships.append({'name': ship_name, 'positions': occupied_positions})
                             send_to_player(player_wfile, f"{ship_name} placed successfully!")
                             placed = True
                         else:
                             send_to_player(player_wfile, f"Cannot place {ship_name} at {coord_str} (orientation={orientation_char}). Try again.")
-                    
                     except ValueError as e:
                         send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
             
             send_to_player(player_wfile, "All ships placed successfully!")
-            send_board_to_player(player_wfile, player_board)
+            send_board_to_player(player_wfile, player_board_obj)
             return True
         else:
-            # Random placement (any non-M input)
-            player_board.place_ships_randomly(SHIPS)
+            player_board_obj.place_ships_randomly(SHIPS)
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
-            send_board_to_player(player_wfile, player_board)
-            return True  # Return True for successful random placement
+            send_board_to_player(player_wfile, player_board_obj)
+            return True
 
     def randomly_place_single_ship(board, ship_name, ship_size):
-        """
-        Randomly place a single ship on the board.
-        Used when a player times out during manual placement.
-        """
         placed = False
         while not placed:
-            orientation = random.randint(0, 1)  # 0 => horizontal, 1 => vertical
+            orientation = random.randint(0, 1)
             row = random.randint(0, board.size - 1)
             col = random.randint(0, board.size - 1)
 
@@ -670,148 +668,157 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     'positions': occupied_positions
                 })
                 placed = True
-    
-    # Create boards for each player
+
+    is_resumed_game = False
     player1_board = Board(BOARD_SIZE)
     player2_board = Board(BOARD_SIZE)
+
+    if initial_player1_board_state and initial_player2_board_state and initial_current_player_name:
+        try:
+            player1_board = Board.deserialize(initial_player1_board_state)
+            player2_board = Board.deserialize(initial_player2_board_state)
+            is_resumed_game = True
+            send_to_player(player1_wfile, "Game resumed.")
+            send_to_player(player2_wfile, "Game resumed.")
+            notify_spectators_callback("Game has been resumed.")
+            print(f"[GAME LOGIC] Resuming game. P1 ships: {len(player1_board.placed_ships)}, P2 ships: {len(player2_board.placed_ships)}")
+            if not player1_board.placed_ships or not player2_board.placed_ships :
+                 print("[GAME LOGIC WARNING] Resumed game but one or both players appear to have no ships placed. This might be okay if resuming before placement finished, or an error.")
+        except Exception as e:
+            print(f"[GAME LOGIC ERROR] Failed to deserialize board states: {e}. Starting a new game.")
+            is_resumed_game = False
+            player1_board = Board(BOARD_SIZE)
+            player2_board = Board(BOARD_SIZE)
+
+    if not is_resumed_game:
+        send_to_player(player1_wfile, f"Welcome to Battleship! You are {player1_username}. Waiting for {player2_username} to be ready...")
+        send_to_player(player2_wfile, f"Welcome to Battleship! You are {player2_username}. Game is starting with {player1_username}.")
+        
+        notify_spectators_callback(f"New game starting between {player1_username} and {player2_username}.")
+        
+        send_to_player(player1_wfile, "Starting ship placement phase...")
+        send_to_player(player2_wfile, f"Waiting for {player1_username} to place ships...")
+        
+        try:
+            if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, player1_username):
+                 print(f"[GAME LOGIC] {player1_username} quit or disconnected during placement (handle_ship_placement returned False).")
+                 raise PlayerDisconnectedError(player1_username, {
+                    'player1_board_state': player1_board.serialize(),
+                    'player2_board_state': player2_board.serialize(),
+                    'next_turn_username': player1_username 
+                })
+        except PlayerDisconnectedError as pde:
+            pde.game_state = {
+                'player1_board_state': player1_board.serialize(),
+                'player2_board_state': player2_board.serialize(),
+                'next_turn_username': player1_username
+            }
+            raise
+
+        send_to_player(player1_wfile, f"Waiting for {player2_username} to place ships...")
+        send_to_player(player2_wfile, f"{player1_username} has placed their ships. Now it's your turn.")
+        
+        try:
+            if not handle_ship_placement(player2_rfile, player2_wfile, player2_board, player2_username):
+                raise PlayerDisconnectedError(player2_username, {
+                    'player1_board_state': player1_board.serialize(),
+                    'player2_board_state': player2_board.serialize(),
+                    'next_turn_username': player2_username
+                })
+        except PlayerDisconnectedError as pde:
+            pde.game_state = {
+                'player1_board_state': player1_board.serialize(),
+                'player2_board_state': player2_board.serialize(),
+                'next_turn_username': player2_username
+            }
+            raise
+
+        send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
+        send_to_player(player2_wfile, "All ships have been placed. Starting the game!")
+        notify_spectators_callback("Ship placement complete. The game begins!")
     
-    # Welcome messages
-    send_to_player(player1_wfile, "Welcome to Battleship! You are Player 1. Waiting for Player 2 to join...")
-    send_to_player(player2_wfile, "Welcome to Battleship! You are Player 2. Game is starting...")
-    
-    # Notify both players that game is starting
-    send_to_player(player1_wfile, "Game is starting! Player 2 has joined.")
-    send_to_player(player2_wfile, "Game is starting! You are playing against Player 1.")
-    
-    # Ship placement phase
-    send_to_player(player1_wfile, "Starting ship placement phase...")
-    send_to_player(player2_wfile, "Waiting for Player 1 to place ships...")
-    
-    if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, "Player 1"):
-        send_to_player(player1_wfile, "You have quit during ship placement. Game ending.")
-        send_to_player(player2_wfile, "Player 1 has quit during ship placement. Game ending.")
-        return
-    
-    send_to_player(player1_wfile, "Waiting for Player 2 to place ships...")
-    send_to_player(player2_wfile, "Player 1 has placed their ships. Now it's your turn.")
-    
-    if not handle_ship_placement(player2_rfile, player2_wfile, player2_board, "Player 2"):
-        send_to_player(player1_wfile, "Player 2 has quit during ship placement. Game ending.")
-        send_to_player(player2_wfile, "You have quit during ship placement. Game ending.")
-        return
-    
-    # Notify both players that the firing phase is starting
-    send_to_player(player1_wfile, "All ships have been placed. Starting the game!")
-    send_to_player(player2_wfile, "All ships have been placed. Starting the game!")
-    
-    # Main game loop - alternate between players
-    current_player = 1  # Start with player 1
-    consecutive_timeouts = 0  # Count consecutive timeouts to prevent infinite loops
+    current_player_name_for_turn = initial_current_player_name if is_resumed_game else player1_username
+    consecutive_timeouts = 0
     
     while True:
-        # Determine current player's files and boards
-        if current_player == 1:
-            current_rfile, current_wfile = player1_rfile, player1_wfile
-            other_rfile, other_wfile = player2_rfile, player2_wfile
-            current_board, opponent_board = player1_board, player2_board
-            current_player_name, opponent_name = "Player 1", "Player 2"
-        else:
-            current_rfile, current_wfile = player2_rfile, player2_wfile
-            other_rfile, other_wfile = player1_rfile, player1_wfile
-            current_board, opponent_board = player2_board, player1_board
-            current_player_name, opponent_name = "Player 2", "Player 1"
+        current_player_is_p1 = (current_player_name_for_turn == player1_username)
+
+        current_rfile, current_wfile = (player1_rfile, player1_wfile) if current_player_is_p1 else (player2_rfile, player2_wfile)
+        other_wfile = player2_wfile if current_player_is_p1 else player1_wfile
+        current_board_obj, opponent_board_obj = (player1_board, player2_board) if current_player_is_p1 else (player2_board, player1_board)
+        actual_current_player_name = player1_username if current_player_is_p1 else player2_username
+        opponent_name = player2_username if current_player_is_p1 else player1_username
         
-        # Notify players about whose turn it is
-        send_to_player(current_wfile, f"It\'s your turn, {current_player_name}!")
-        send_to_player(other_wfile, f"Waiting for {current_player_name} to make a move...")
+        send_to_player(current_wfile, f"It's your turn, {actual_current_player_name}!")
+        send_to_player(other_wfile, f"Waiting for {actual_current_player_name} to make a move...")
         
-        # Send board states to current player
-        send_board_to_player(current_wfile, current_board, opponent_board)
+        send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
         
-        # Prompt for a move
+        # Send current boards to spectators before the move
+        send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
+
         send_to_player(current_wfile, f"Enter coordinate to fire at (e.g. B5): (You have {MOVE_TIMEOUT} seconds)")
         
-        # Get the move with timeout
-        guess = recv_from_player_with_timeout(current_rfile, MOVE_TIMEOUT)
-        
-        # Handle timeout case
-        if guess is None:
-            consecutive_timeouts += 1
-            
-            # If too many consecutive timeouts, end the game
-            if consecutive_timeouts >= 3:
-                send_to_player(current_wfile, "You have timed out too many times. You forfeit the game.")
-                send_to_player(other_wfile, f"{current_player_name} has timed out too many times and forfeited. You win!")
-                return
-                
-            send_to_player(current_wfile, f"You took too long to make a move. Your turn is skipped. You have {3 - consecutive_timeouts} timeouts remaining.")
-            send_to_player(other_wfile, f"{current_player_name} timed out and their turn was skipped.")
-            
-            # Skip to next player's turn
-            current_player = 2 if current_player == 1 else 1
-            continue
-        
-        # Reset consecutive timeouts counter if a valid move was made
-        consecutive_timeouts = 0
+        guess = None
+        try:
+            guess = recv_from_player_with_timeout(current_rfile, MOVE_TIMEOUT, actual_current_player_name)
+        except PlayerDisconnectedError as pde:
+            print(f"[GAME LOGIC] PlayerDisconnectedError for {pde.player_name} during their turn.")
+            pde.game_state = {
+                'player1_board_state': player1_board.serialize(),
+                'player2_board_state': player2_board.serialize(),
+                'next_turn_username': actual_current_player_name
+            }
+            raise
+
+        consecutive_timeouts = 0 
         
         if guess.lower() == 'quit':
             send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
-            send_to_player(other_wfile, f"{current_player_name} has quit. You win by default!")
-            return
-        
+            send_to_player(other_wfile, f"{actual_current_player_name} has quit. You win by default!")
+            notify_spectators_callback(f"{actual_current_player_name} has quit. {opponent_name} wins.")
+            return None
+
         try:
             row, col = parse_coordinate(guess)
-            result, sunk_name = opponent_board.fire_at(row, col)
+            result, sunk_name = opponent_board_obj.fire_at(row, col)
             
-            # Inform both players of the result
             if result == 'hit':
                 if sunk_name:
-                    send_to_player(current_wfile, f"HIT! You sank {opponent_name}\'s {sunk_name}!")
-                    send_to_player(other_wfile, f"{current_player_name} fired at {guess} and sank your {sunk_name}!")
-                    notify_spectators_wrapper(f"{current_player_name} fired at {guess} and sank {opponent_name}\'s {sunk_name}!")
+                    send_to_player(current_wfile, f"HIT! You sank {opponent_name}'s {sunk_name}!")
+                    send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and sank your {sunk_name}!")
+                    notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and sank {opponent_name}'s {sunk_name}!")
                 else:
                     send_to_player(current_wfile, "HIT!")
-                    send_to_player(other_wfile, f"{current_player_name} fired at {guess} and scored a hit!")
-                    notify_spectators_wrapper(f"{current_player_name} fired at {guess} and scored a hit!")
-                
-                # Check if all ships are sunk
-                if opponent_board.all_ships_sunk():
-                    # Show both boards to both players one final time
-                    send_board_to_player(current_wfile, current_board, opponent_board)
-                    send_board_to_player(other_wfile, opponent_board, current_board)
-                    send_board_to_spectators(current_board, opponent_board, notify_spectators_wrapper)
+                    send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and scored a hit!")
+                    notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and scored a hit!")
+
+                if opponent_board_obj.all_ships_sunk():
+                    send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
+                    send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
+                    send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
                     
-                    # Send victory/defeat messages
-                    send_to_player(current_wfile, f"Congratulations! You\'ve sunk all of {opponent_name}\'s ships. You win!")
-                    send_to_player(other_wfile, f"Game over! {current_player_name} has sunk all your ships.")
-                    notify_spectators_wrapper(f"Game over! {current_player_name} has won by sinking all of {opponent_name}\'s ships!")
-                    return
+                    send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
+                    send_to_player(other_wfile, f"Game over! {actual_current_player_name} has sunk all your ships.")
+                    notify_spectators_callback(f"Game over! {actual_current_player_name} has won by sinking all of {opponent_name}'s ships!")
+                    return None
             elif result == 'miss':
                 send_to_player(current_wfile, "MISS!")
-                send_to_player(other_wfile, f"{current_player_name} fired at {guess} and missed!")
-                notify_spectators_wrapper(f"{current_player_name} fired at {guess} and missed!")
+                send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and missed!")
+                notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and missed!")
             elif result == 'already_shot':
-                send_to_player(current_wfile, "You\'ve already fired at that location. Try again.")
-                # Don't switch players for an invalid move
+                send_to_player(current_wfile, "You've already fired at that location. Try again.")
                 continue
             elif result == 'invalid':
                 send_to_player(current_wfile, "Invalid coordinate. Please enter a valid coordinate (e.g. A1-J10).")
-                # Don't switch players for an invalid move
                 continue
-                
-            print("DEBUG: Player made a move:", guess)
-            print("DEBUG: Result:", result, "Sunk:", sunk_name)
-            
-            # Send updated boards to spectators after each move
-            send_board_to_spectators(current_board, opponent_board, notify_spectators_wrapper)
-                
-        except ValueError as e:
+
+
+        except ValueError as e: # From parse_coordinate
             send_to_player(current_wfile, f"Invalid input: {e}. Try again.")
-            # Don't switch players for an invalid move
             continue
         
-        # Switch to the other player for the next turn
-        current_player = 2 if current_player == 1 else 1
+        current_player_name_for_turn = opponent_name
 
 
 def handle_spectator(conn, addr, spectators):
