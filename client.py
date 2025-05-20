@@ -207,6 +207,8 @@ class BattleshipGUI(tk.Tk):
         # Game state
         self.last_fired_coord = None
         self.awaiting_shot_result = False
+        self.sunk_ships_on_my_board_coords = []
+        self.sunk_ships_on_opponent_board_coords = []
 
         # Board configuration
         self.board_size = 10
@@ -901,6 +903,10 @@ class BattleshipGUI(tk.Tk):
         """Updates the game boards based on the received board string from the server."""
         lines = board_string.strip().split('\n')
 
+        self.sunk_ships_on_my_board_coords = []
+        self.sunk_ships_on_opponent_board_coords = []
+        current_sunk_list_target = None
+
         if self.is_spectator:
             player1_grid_data = []
             player2_grid_data = []
@@ -970,6 +976,11 @@ class BattleshipGUI(tk.Tk):
             if player2_grid_data or current_parsing_target_spectator == "P2":
                 self.draw_board_on_canvas(self.opponent_board_canvas, player2_grid_data)
 
+            if current_parsing_target_spectator == "P1":
+                current_sunk_list_target = self.sunk_ships_on_my_board_coords
+            elif current_parsing_target_spectator == "P2":
+                current_sunk_list_target = self.sunk_ships_on_opponent_board_coords
+
         else:
             current_parsing_grid = None
             current_grid_data = []
@@ -995,8 +1006,32 @@ class BattleshipGUI(tk.Tk):
                     if hasattr(self, 'opponent_board_name_label'):
                         self.opponent_board_name_label.config(text="Opponent's Board")
                     current_grid_data = []
+                    current_sunk_list_target = self.sunk_ships_on_opponent_board_coords
                     continue
                 
+                sunk_info_key = "SUNK_SHIPS_INFO:"
+                if line_strip.startswith(sunk_info_key) and current_sunk_list_target is not None:
+                    data_part = line_strip[len(sunk_info_key):]
+                    if data_part:
+                        ship_entries = data_part.split(';')
+                        for entry in ship_entries:
+                            if ':' not in entry: continue
+                            name_part, coords_data_part = entry.split(':', 1)
+                            coord_pair_strs = coords_data_part.split('_')
+                            ship_cell_coords = set()
+                            for cp_str in coord_pair_strs:
+                                if ',' not in cp_str: continue
+                                try:
+                                    r_str, c_str = cp_str.split(',')
+                                    r, c = int(r_str), int(c_str)
+                                    if 0 <= r < self.board_size and 0 <= c < self.board_size:
+                                        ship_cell_coords.add((r, c))
+                                except ValueError:
+                                    self.log_command(f"[DEBUG] Failed to parse sunk ship r,c pair: {cp_str}", "debug")
+                            if ship_cell_coords:
+                                current_sunk_list_target.append(ship_cell_coords)
+                    continue
+
                 if line_strip and line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
                     if all(item.isdigit() for item in line_strip.split()):
                         continue
@@ -1008,14 +1043,27 @@ class BattleshipGUI(tk.Tk):
                         if len(cells) == self.board_size:
                             current_grid_data.append(cells)
 
-            if current_parsing_grid == "player" and current_grid_data:
-                self.draw_board_on_canvas(self.player_board_canvas, current_grid_data)
-            elif current_parsing_grid == "opponent" and current_grid_data:
-                self.draw_board_on_canvas(self.opponent_board_canvas, current_grid_data)
+            if self.is_spectator:
+                if current_parsing_target_spectator == "P1":
+                    current_sunk_list_target = self.sunk_ships_on_my_board_coords
+                elif current_parsing_target_spectator == "P2":
+                    current_sunk_list_target = self.sunk_ships_on_opponent_board_coords
+            else:
+                if current_parsing_grid == "player":
+                    current_sunk_list_target = self.sunk_ships_on_my_board_coords
+                elif current_parsing_grid == "opponent":
+                    current_sunk_list_target = self.sunk_ships_on_opponent_board_coords
+
+            if not self.is_spectator:
+                if current_parsing_grid == "player" and current_grid_data:
+                    self.draw_board_on_canvas(self.player_board_canvas, current_grid_data)
+                elif current_parsing_grid == "opponent" and current_grid_data:
+                    self.draw_board_on_canvas(self.opponent_board_canvas, current_grid_data)
 
     def draw_board_on_canvas(self, canvas, grid_data):
         """Draws the game board on the specified canvas using the provided grid data."""
         canvas.delete("cells")
+        canvas.delete("cells_sunk_ship_line")
 
         grid_origin_x = self.cell_size
         grid_origin_y = self.cell_size
@@ -1026,37 +1074,13 @@ class BattleshipGUI(tk.Tk):
         miss_dot_radius = self.cell_size * 0.25
         hit_x_padding = self.cell_size * 0.2
 
-        water_bg_color = "#4682B4" 
-
-        hit_positions = []
-        current_hits = []
-        last_was_hit = False
+        water_bg_color = "#4682B4"
 
         for r, row_data in enumerate(grid_data):
             if r >= self.board_size: continue
             for c, cell_char in enumerate(row_data):
                 if c >= self.board_size: continue
                 
-                if cell_char == 'X':
-                    if not last_was_hit:
-                        current_hits = []
-                    current_hits.append((r, c))
-                    last_was_hit = True
-                else:
-                    if last_was_hit and current_hits:
-                        hit_positions.append(current_hits)
-                        current_hits = []
-                    last_was_hit = False
-            if last_was_hit and current_hits:
-                hit_positions.append(current_hits)
-                current_hits = []
-                last_was_hit = False
-
-        for r, row_data in enumerate(grid_data):
-            if r >= self.board_size: continue
-            for c, cell_char in enumerate(row_data):
-                if c >= self.board_size: continue
-
                 x0_rect = grid_origin_x + c * self.cell_size
                 y0_rect = grid_origin_y + r * self.cell_size
                 x1_rect = x0_rect + self.cell_size
@@ -1094,18 +1118,28 @@ class BattleshipGUI(tk.Tk):
                                         x1_rect - hit_x_padding, y0_rect + hit_x_padding,
                                         fill='#DC143C', width=3, tags="cells")
 
-        for hits in hit_positions:
-            if len(hits) > 1:
-                first_r, first_c = hits[0]
-                last_r, last_c = hits[-1]
-                
-                start_x = grid_origin_x + first_c * self.cell_size + self.cell_size / 2
-                start_y = grid_origin_y + first_r * self.cell_size + self.cell_size / 2
-                end_x = grid_origin_x + last_c * self.cell_size + self.cell_size / 2
-                end_y = grid_origin_y + last_r * self.cell_size + self.cell_size / 2
-                
-                canvas.create_line(start_x, start_y, end_x, end_y,
-                                 fill='#DC143C', width=2, tags="cells")
+        # Draw strike-through for sunk ships
+        sunk_ships_to_draw_lines_for = None
+        if canvas == self.player_board_canvas:
+            sunk_ships_to_draw_lines_for = self.sunk_ships_on_my_board_coords
+        elif canvas == self.opponent_board_canvas:
+            sunk_ships_to_draw_lines_for = self.sunk_ships_on_opponent_board_coords
+
+        if sunk_ships_to_draw_lines_for:
+            for ship_coords_set in sunk_ships_to_draw_lines_for:
+                if len(ship_coords_set) > 1:
+                    coords_list = sorted(list(ship_coords_set))
+
+                    first_r, first_c = coords_list[0]
+                    last_r, last_c = coords_list[-1]
+
+                    start_x = grid_origin_x + first_c * self.cell_size + self.cell_size / 2
+                    start_y = grid_origin_y + first_r * self.cell_size + self.cell_size / 2
+                    end_x = grid_origin_x + last_c * self.cell_size + self.cell_size / 2
+                    end_y = grid_origin_y + last_r * self.cell_size + self.cell_size / 2
+
+                    canvas.create_line(start_x, start_y, end_x, end_y,
+                                     fill='#FF0000', width=max(2, int(self.cell_size * 0.1)), tags="cells_sunk_ship_line")
 
     def _send_chat(self):
         """Handles sending chat messages."""

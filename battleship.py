@@ -41,9 +41,11 @@ class Board:
       - self.placed_ships: a list of dicts, each dict with:
           {
              'name': <ship_name>,
-             'positions': set of (r, c),
+             'original_positions': frozenset of (r, c) for all original cells,
+             'remaining_positions': set of (r, c) for cells not yet hit,
           }
         used to determine when a specific ship has been fully sunk.
+      - self.sunk_ship_details: list of {'name': ship_name, 'coords': frozenset_of_original_coords}
 
     In a full 2-player networked game:
       - Each player has their own Board instance.
@@ -57,6 +59,7 @@ class Board:
         self.hidden_grid = [['.' for _ in range(size)] for _ in range(size)]
         self.display_grid = [['.' for _ in range(size)] for _ in range(size)]
         self.placed_ships = []
+        self.sunk_ship_details = []
         self.spectators = []
 
     def place_ships_randomly(self, ships=SHIPS):
@@ -77,7 +80,8 @@ class Board:
                     occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
                     self.placed_ships.append({
                         'name': ship_name,
-                        'positions': occupied_positions
+                        'original_positions': frozenset(occupied_positions),
+                        'remaining_positions': set(occupied_positions)
                     })
                     placed = True
 
@@ -115,7 +119,8 @@ class Board:
                     occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
                     self.placed_ships.append({
                         'name': ship_name,
-                        'positions': occupied_positions
+                        'original_positions': frozenset(occupied_positions),
+                        'remaining_positions': set(occupied_positions)
                     })
                     break
                 else:
@@ -159,13 +164,13 @@ class Board:
 
     def fire_at(self, row, col):
         """
-        Fire at (row, col). Return a tuple (result, sunk_ship_name).
+        Fire at (row, col). Return a tuple (result, payload).
         Possible outcomes:
-          - ('hit', None)          if it's a hit but not sunk
-          - ('hit', <ship_name>)   if that shot causes the entire ship to sink
-          - ('miss', None)         if no ship was there
-          - ('already_shot', None) if that cell was already revealed as 'X' or 'o'
-          - ('invalid', None)      if the coordinates are out of bounds
+          - ('hit', None)                               if it's a hit but not sunk
+          - ('hit', (sunk_ship_name, original_coords))  if the shot causes the entire ship to sink
+          - ('miss', None)                              if no ship was there
+          - ('already_shot', None)                      if that cell was already revealed as 'X' or 'o'
+          - ('invalid', None)                           if the coordinates are out of bounds
 
         The server can use this result to inform the firing player.
         """
@@ -179,9 +184,9 @@ class Board:
             self.hidden_grid[row][col] = 'X'
             self.display_grid[row][col] = 'X'
             # Check if that hit sank a ship
-            sunk_ship_name = self._mark_hit_and_check_sunk(row, col)
+            sunk_ship_name, original_sunk_ship_coords = self._mark_hit_and_check_sunk(row, col)
             if sunk_ship_name:
-                return ('hit', sunk_ship_name)  # A ship has just been sunk
+                return ('hit', (sunk_ship_name, original_sunk_ship_coords))
             else:
                 return ('hit', None)
         elif cell == '.':
@@ -192,29 +197,35 @@ class Board:
         elif cell == 'X' or cell == 'o':
             return ('already_shot', None)
         else:
-            # In principle, this branch shouldn't happen if 'S', '.', 'X', 'o' are all possibilities
             return ('already_shot', None)
 
     def _mark_hit_and_check_sunk(self, row, col):
         """
-        Remove (row, col) from the relevant ship's positions.
-        If that ship's positions become empty, return the ship name (it's sunk).
-        Otherwise return None.
+        Remove (row, col) from the relevant ship's remaining_positions.
+        If that ship's remaining_positions become empty, record it in sunk_ship_details
+        and return (ship_name, original_positions).
+        Otherwise return (None, None).
         """
         for ship in self.placed_ships:
-            if (row, col) in ship['positions']:
-                ship['positions'].remove((row, col))
-                if len(ship['positions']) == 0:
-                    return ship['name']
+            if (row, col) in ship['remaining_positions']:
+                ship['remaining_positions'].remove((row, col))
+                if not ship['remaining_positions']:
+                    is_already_sunk = any(s_detail['name'] == ship['name'] for s_detail in self.sunk_ship_details)
+                    if not is_already_sunk:
+                        self.sunk_ship_details.append({
+                            'name': ship['name'],
+                            'coords': ship['original_positions']
+                        })
+                    return ship['name'], ship['original_positions']
                 break
-        return None
+        return None, None
 
     def all_ships_sunk(self):
         """
         Check if all ships are sunk (i.e. every ship's positions are empty).
         """
         for ship in self.placed_ships:
-            if len(ship['positions']) > 0:
+            if len(ship['remaining_positions']) > 0:
                 return False
         return True
 
@@ -252,20 +263,28 @@ class Board:
 
     def serialize(self):
         """Return a dictionary representing the board's state."""
-        # Convert sets of tuples to lists of lists for JSON compatibility
         serialized_placed_ships = []
         for ship in self.placed_ships:
             serialized_ship = {
                 'name': ship['name'],
-                'positions': [list(pos) for pos in ship['positions']]
+                'original_positions': [list(pos) for pos in ship['original_positions']],
+                'remaining_positions': [list(pos) for pos in ship['remaining_positions']]
             }
             serialized_placed_ships.append(serialized_ship)
+
+        serialized_sunk_ship_details = []
+        for sunk_ship in self.sunk_ship_details:
+            serialized_sunk_ship_details.append({
+                'name': sunk_ship['name'],
+                'coords': [list(pos) for pos in sunk_ship['coords']]
+            })
 
         return {
             'size': self.size,
             'hidden_grid': self.hidden_grid,
             'display_grid': self.display_grid,
-            'placed_ships': serialized_placed_ships
+            'placed_ships': serialized_placed_ships,
+            'sunk_ship_details': serialized_sunk_ship_details
         }
 
     @classmethod
@@ -280,10 +299,19 @@ class Board:
         for ship_data in data['placed_ships']:
             deserialized_ship = {
                 'name': ship_data['name'],
-                'positions': {tuple(pos) for pos in ship_data['positions']}
+                'original_positions': frozenset(tuple(pos) for pos in ship_data['original_positions']),
+                'remaining_positions': {tuple(pos) for pos in ship_data['remaining_positions']}
             }
             deserialized_placed_ships.append(deserialized_ship)
         board.placed_ships = deserialized_placed_ships
+        
+        deserialized_sunk_ship_details = []
+        for sunk_data in data.get('sunk_ship_details', []):
+            deserialized_sunk_ship_details.append({
+                'name': sunk_data['name'],
+                'coords': frozenset(tuple(pos) for pos in sunk_data['coords'])
+            })
+        board.sunk_ship_details = deserialized_sunk_ship_details
         
         return board
 
@@ -502,6 +530,17 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             print(f"Error sending message to {player_name}: {e}")
             raise PlayerDisconnectedError(player_name, None) from e
 
+    def _format_sunk_ships_payload(board_obj):
+        if board_obj and board_obj.sunk_ship_details:
+            sunk_info_str = "SUNK_SHIPS_INFO:"
+            parts = []
+            for sunk_ship in board_obj.sunk_ship_details:
+                coord_strs = [f"{r},{c}" for r, c in sorted(list(sunk_ship['coords']))]
+                parts.append(f"{sunk_ship['name']}:{'_'.join(coord_strs)}")
+            sunk_info_str += ";".join(parts)
+            return sunk_info_str + "\n"
+        return ""
+
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
         """
         Sends board state(s) to the player. Should work upon each move, but somewhat buggy (can be delayed).
@@ -516,6 +555,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 row_label = chr(ord('A') + r_idx)
                 row_str = "".join(cell.center(3) for cell in r_val)
                 player_wfile.write(f"{row_label}  {row_str}\n")
+            player_wfile.write(_format_sunk_ships_payload(own_board))
             player_wfile.write('\n')
             player_wfile.flush()
 
@@ -528,6 +568,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     row_label = chr(ord('A') + r_idx)
                     row_str = "".join(cell.center(3) for cell in r_val)
                     player_wfile.write(f"{row_label}  {row_str}\n")
+                player_wfile.write(_format_sunk_ships_payload(opponent_board))
                 player_wfile.write('\n')
                 player_wfile.flush()
 
@@ -555,6 +596,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 for c in range(p1_board_obj.size):
                     row_str += p1_board_obj.display_grid[r][c].center(3)
                 board_data.append(f"{row_label}  {row_str}\n")
+            board_data.append(_format_sunk_ships_payload(p1_board_obj))
             board_data.append("\n")
             
             # Add Player 2's board 
@@ -569,6 +611,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 for c in range(p2_board_obj.size):
                     row_str += p2_board_obj.display_grid[r][c].center(3)
                 board_data.append(f"{row_label}  {row_str}\n")
+            board_data.append(_format_sunk_ships_payload(p2_board_obj))
             board_data.append("\n")
             
             notify_callback_func("".join(board_data))
@@ -634,7 +677,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         
                         if player_board_obj.can_place_ship(row, col, ship_size, orientation_enum):
                             occupied_positions = player_board_obj.do_place_ship(row, col, ship_size, orientation_enum)
-                            player_board_obj.placed_ships.append({'name': ship_name, 'positions': occupied_positions})
+                            player_board_obj.placed_ships.append({'name': ship_name, 'original_positions': frozenset(occupied_positions), 'remaining_positions': set(occupied_positions)})
                             send_to_player(player_wfile, f"{ship_name} placed successfully!")
                             placed = True
                         else:
@@ -662,7 +705,8 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                 occupied_positions = board.do_place_ship(row, col, ship_size, orientation)
                 board.placed_ships.append({
                     'name': ship_name,
-                    'positions': occupied_positions
+                    'original_positions': frozenset(occupied_positions),
+                    'remaining_positions': set(occupied_positions)
                 })
                 placed = True
 
@@ -759,28 +803,44 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(current_wfile, f"It's your turn, {actual_current_player_name}!")
             send_to_player(other_wfile, f"Waiting for {actual_current_player_name} to make a move...")
 
-            try:
-                sock = current_rfile.conn
-                sock.setblocking(False)
-                while True:
-                    data = sock.recv(4096)
-                    if not data:
-                        break
-            except BlockingIOError:
-                pass
-            finally:
-                sock.setblocking(True)
+            if hasattr(current_rfile, 'conn'):
+                try:
+                    sock = current_rfile.conn
+                    sock.setblocking(False)
+                    while True:
+                        data = sock.recv(4096)
+                        if not data:
+                            raise PlayerDisconnectedError(actual_current_player_name, {
+                                'player1_board_state': player1_board.serialize(),
+                                'player2_board_state': player2_board.serialize(),
+                                'next_turn_username': actual_current_player_name
+                            })
+                except BlockingIOError:
+                    pass
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                     raise PlayerDisconnectedError(actual_current_player_name, {
+                        'player1_board_state': player1_board.serialize(),
+                        'player2_board_state': player2_board.serialize(),
+                        'next_turn_username': actual_current_player_name
+                    }) from e
+                finally:
+                    if 'sock' in locals() and sock:
+                         sock.setblocking(True)
             
             send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
-            
+
             send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
 
             send_to_player(current_wfile, f"Enter coordinate to fire at (e.g. B5): (You have {MOVE_TIMEOUT} seconds)")
-            
-            guess = recv_from_player_with_timeout(current_rfile, MOVE_TIMEOUT, actual_current_player_name)
 
-            consecutive_timeouts = 0 
-            
+            guess = recv_from_player_with_timeout(current_rfile, MOVE_TIMEOUT, actual_current_player_name)            
+            if guess is None:
+                send_to_player(current_wfile, "Timeout! You did not make a move.")
+                current_player_name_for_turn = opponent_name
+                continue
+
+            consecutive_timeouts = 0
+
             if guess.lower() == 'quit':
                 send_to_player(current_wfile, "You have quit the game. Your opponent wins by default.")
                 send_to_player(other_wfile, f"{actual_current_player_name} has quit. You win by default!")
@@ -789,10 +849,14 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
 
             try:
                 row, col = parse_coordinate(guess)
-                result, sunk_name = opponent_board_obj.fire_at(row, col)
+                result, fire_payload = opponent_board_obj.fire_at(row, col)
                 
                 if result == 'hit':
-                    if sunk_name:
+                    sunk_ship_details_for_message = None
+                    if fire_payload:
+                        sunk_name, original_coords = fire_payload
+                        sunk_ship_details_for_message = sunk_name
+
                         send_to_player(current_wfile, f"HIT! You sank {opponent_name}'s {sunk_name}!")
                         send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and sank your {sunk_name}!")
                         notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and sank {opponent_name}'s {sunk_name}!")
