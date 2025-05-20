@@ -37,7 +37,7 @@ PACKET_TYPE_CHAT = 11
 # - Data Length (4 bytes) - Length of the (IV + encrypted payload) in bytes
 # - Checksum (4 bytes) - CRC32 checksum for data integrity
 # Total header size: 17 bytes
-# Then followed by IV (16 bytes) + variable-length encrypted payload data
+# Followed by IV (16 bytes) + variable-length encrypted payload data
 
 HEADER_SIZE = 17
 HEADER_FORMAT = ">IIBI" # unsigned int, unsigned int, unsigned char, unsigned int

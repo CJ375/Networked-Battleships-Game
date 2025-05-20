@@ -245,8 +245,8 @@ class BattleshipGUI(tk.Tk):
         self.chat_display.tag_configure("other_msg_text", foreground="black")
         self.chat_display.tag_configure("spectator_msg_sender", foreground="purple", font=("Helvetica", 9, "bold"))
         self.chat_display.tag_configure("spectator_msg_text", foreground="purple")
-        self.chat_display.tag_configure("server_info_sender", foreground="orange", font=("Helvetica", 9, "bold"))
-        self.chat_display.tag_configure("server_info_text", foreground="orange")
+        self.chat_display.tag_configure("server_info_sender", foreground="royalblue", font=("Helvetica", 9, "bold"))
+        self.chat_display.tag_configure("server_info_text", foreground="royalblue")
         self.chat_display.tag_configure("error_msg_sender", foreground="red", font=("Helvetica", 9, "bold"))
         self.chat_display.tag_configure("error_msg_text", foreground="red")
         self.chat_display.tag_configure("game_event_text", foreground="#555555", font=("Helvetica", 9, "italic"))
@@ -440,10 +440,8 @@ class BattleshipGUI(tk.Tk):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
-            self.log_message(f"[INFO] Connected to server at {HOST}:{PORT}", msg_type="info")
 
             if send_packet(self.sock, PACKET_TYPE_USERNAME, self.username):
-                self.log_message(f"[INFO] Username '{self.username}' sent to server.", msg_type="info")
                 save_connection_info(self.username) 
                 mark_connection_active(self.username) 
                 
@@ -452,7 +450,6 @@ class BattleshipGUI(tk.Tk):
                 
                 self.after(GUI_UPDATE_INTERVAL, self._process_gui_queue)
                 
-                self.log_message("[INFO] Waiting for server response...", msg_type="info")
                 self.log_message("[INFO] You may be placed as a player or spectator.", msg_type="info")
                 self.log_message("[INFO] Type messages in the input field below and press Enter or Send Chat.", msg_type="info")
                 self.log_message("[INFO] Click on opponent's board to fire. Follow prompts for ship placement.", msg_type="info")
