@@ -488,7 +488,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     
     def send_to_player(player_wfile, msg):
         """
-        Sends a message to the player.
+        Sends a message to the player. Should work upon each move, but somewhat buggy.
         """
         try:
             player_wfile.write(msg + '\n')
@@ -789,11 +789,11 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and scored a hit!")
                         notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and scored a hit!")
 
+                    send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
+                    send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
+                    send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
+
                     if opponent_board_obj.all_ships_sunk():
-                        send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
-                        send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
-                        send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
-                        
                         send_to_player(current_wfile, f"Congratulations! You've sunk all of {opponent_name}'s ships. You win!")
                         send_to_player(other_wfile, f"Game over! {actual_current_player_name} has sunk all your ships.")
                         notify_spectators_callback(f"Game over! {actual_current_player_name} has won by sinking all of {opponent_name}'s ships!")
@@ -802,6 +802,10 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                     send_to_player(current_wfile, "MISS!")
                     send_to_player(other_wfile, f"{actual_current_player_name} fired at {guess} and missed!")
                     notify_spectators_callback(f"{actual_current_player_name} fired at {guess} and missed!")
+
+                    send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
+                    send_board_to_player(other_wfile, opponent_board_obj, current_board_obj)
+                    send_board_to_spectators(player1_board, player2_board, notify_spectators_callback)
                 elif result == 'already_shot':
                     send_to_player(current_wfile, "You've already fired at that location. Try again.")
                     continue  
