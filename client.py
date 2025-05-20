@@ -888,6 +888,8 @@ class BattleshipGUI(tk.Tk):
             self.log_command("\n[RECONNECTED] " + payload_str, msg_type="info")
             if self.username:
                 mark_connection_active(self.username)
+                if not self.is_spectator:
+                    self.opponent_progress_frame.pack(side=tk.TOP, fill=tk.X, pady=5, after=self.boards_frame)
 
         elif packet_type == PACKET_TYPE_HEARTBEAT:
             if self.sock: send_packet(self.sock, PACKET_TYPE_ACK, b'')

@@ -353,7 +353,16 @@ def handle_waiting_player(conn, addr, username, stop_event):
 
 def handle_spectator(conn, addr, game):
     """Manages a spectator connection, providing game updates and chat functionality."""
-    spectator_username = f"Spectator@{addr[0]}:{addr[1]}"
+    spectator_username = None
+    with active_usernames_lock:
+        for username, conn_obj in active_usernames.items():
+            if conn_obj == conn:
+                spectator_username = username
+                break
+    
+    if not spectator_username:
+        spectator_username = f"Spectator@{addr[0]}:{addr[1]}"
+        print(f"[WARNING] Could not find username for spectator {addr}, using fallback name")
     
     try:
         if not _send_spectator_message(conn, PACKET_TYPE_CHAT, "\nWelcome! You are now spectating a Battleship game.", "welcome"):
@@ -690,15 +699,80 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                     notify_spectators("Players agreed to a rematch!")
                     play_again = True
                 else:
-                    play_again = False
-                    if not player1_wants_rematch:
-                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
-                        notify_spectators(f"{player1_username} declined a rematch.")
-                    elif not player2_wants_rematch:
-                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
-                        notify_spectators(f"{player2_username} declined a rematch.")
+                    with spectators_lock:
+                        available_spectators = list(current_game_spectators)
+                    
+                    if len(available_spectators) >= 2:
+                        if not player1_wants_rematch and not player2_wants_rematch:
+                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                            notify_spectators(f"Both players declined rematch. Starting a new game with spectators!")
+                            
+                            spec1_conn = available_spectators[0]
+                            spec2_conn = available_spectators[1]
+                            
+                            with spectators_lock:
+                                current_game_spectators.remove(spec1_conn)
+                                current_game_spectators.remove(spec2_conn)
+                            
+                            send_packet(spec1_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game as a player.")
+                            send_packet(spec2_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game as a player.")
+                            
+                            try:
+                                spec1_conn.close()
+                                spec2_conn.close()
+                            except:
+                                pass
+                            
+                            play_again = False
+                        elif player1_wants_rematch or player2_wants_rematch:
+                            staying_player = player1_username if player1_wants_rematch else player2_username
+                            leaving_player = player2_username if player1_wants_rematch else player1_username
+                            staying_conn = player1_adapter.conn if player1_wants_rematch else player2_adapter.conn
+                            
+                            send_packet(staying_conn, PACKET_TYPE_CHAT, f"{leaving_player} declined rematch. Looking for a new opponent...")
+                            send_packet(player1_adapter.conn if not player1_wants_rematch else player2_adapter.conn, 
+                                      PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                            
+                            if available_spectators:
+                                spec_conn = available_spectators[0]
+                                
+                                with spectators_lock:
+                                    current_game_spectators.remove(spec_conn)
+                                
+                                send_packet(spec_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game as a player.")
+                                notify_spectators(f"{leaving_player} declined rematch. {staying_player} will play against a new opponent.")
+                                
+                                try:
+                                    spec_conn.close()
+                                except:
+                                    pass
+                                
+                                play_again = False
+                            else:
+                                send_packet(staying_conn, PACKET_TYPE_GAME_END, "No spectators available to play. Session ending.")
+                                notify_spectators(f"{leaving_player} declined rematch and no spectators available. Game ending.")
+                                play_again = False
+                        else:
+                            play_again = False
+                            if not player1_wants_rematch:
+                                send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                                send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
+                                notify_spectators(f"{player1_username} declined a rematch.")
+                            elif not player2_wants_rematch:
+                                send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                                send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
+                                notify_spectators(f"{player2_username} declined a rematch.")
+                    else:
+                        play_again = False
+                        if not player1_wants_rematch:
+                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
+                            notify_spectators(f"{player1_username} declined a rematch.")
+                        elif not player2_wants_rematch:
+                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
+                            notify_spectators(f"{player2_username} declined a rematch.")
                     break
 
         if not play_again:
