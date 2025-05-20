@@ -158,7 +158,7 @@ class ProtocolAdapter:
                 else:
                     log_message += f"Failed to receive valid packet or payload. Valid: {valid}, Header: {header is not None}, Payload: {payload is not None}"
                 print(f"[ADAPTER INFO] {log_message}")
-                raise ConnectionResetError(f"Communication error or disconnect for {self.username}")
+                raise PlayerDisconnectedError(self.username, None)
 
             payload_str = payload.decode() if isinstance(payload, bytes) else payload
             _magic, _seq, packet_type, _data_len = header
@@ -184,7 +184,7 @@ class ProtocolAdapter:
 
             elif packet_type == PACKET_TYPE_DISCONNECT:
                 print(f"[ADAPTER INFO] {self.username} - Received DISCONNECT signal during readline.")
-                raise ConnectionResetError(f"Player {self.username} sent disconnect signal")
+                raise PlayerDisconnectedError(self.username, None)
 
             elif packet_type == PACKET_TYPE_HEARTBEAT:
                 print(f"[ADAPTER WARNING] {self.username} - Received unexpected HEARTBEAT. Sending ACK and continuing.")
@@ -219,8 +219,9 @@ class ProtocolAdapter:
             self.buffer.append(msg)
         else:
             if not send_packet(self.conn, PACKET_TYPE_CHAT, msg.strip()):
-                print(f"[ADAPTER ERROR] send_packet failed for CHAT in write() for {player_name_for_error}")
-                raise PlayerDisconnectedError(player_name_for_error, None)
+                print(f"[ADAPTER ERROR] send_packet failed for CHAT in write() for {self.username}")
+                raise PlayerDisconnectedError(self.username, None)
+        
         return len(msg)
         
     def flush(self):
@@ -232,8 +233,8 @@ class ProtocolAdapter:
             self.grid_mode = False 
 
             if not send_packet(self.conn, PACKET_TYPE_BOARD_UPDATE, grid_msg_to_send):
-                print(f"[ADAPTER ERROR] send_packet failed for BOARD_UPDATE in flush() for {player_name_for_error}")
-                raise PlayerDisconnectedError(player_name_for_error, None)
+                print(f"[ADAPTER ERROR] send_packet failed for BOARD_UPDATE in flush() for {self.username}")
+                raise PlayerDisconnectedError(self.username, None)
         return True
 
 def handle_player_disconnect(player_conn, player_name):
