@@ -488,7 +488,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     
     def send_to_player(player_wfile, msg):
         """
-        Sends a message to the player. Should work upon each move, but somewhat buggy.
+        Sends a message to the player.
         """
         try:
             player_wfile.write(msg + '\n')
@@ -504,7 +504,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
 
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
         """
-        Sends board state(s) to the player.
+        Sends board state(s) to the player. Should work upon each move, but somewhat buggy (can be delayed).
         """
         player_name = getattr(player_wfile, 'username', 'UnknownPlayer')
         try:

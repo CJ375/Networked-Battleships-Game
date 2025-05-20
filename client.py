@@ -500,33 +500,7 @@ class BattleshipGUI(tk.Tk):
         """Handles the initial username prompt and connection process."""
         global current_username 
 
-        recent_connections = check_any_recent_connections()
-        chosen_username = None
-
-        if recent_connections:
-            options = []
-            for i, (uname, elapsed) in enumerate(recent_connections):
-                options.append(f"{uname} (disconnected {elapsed:.0f}s ago)")
-            
-            dialog = ReconnectionDialog(self, "Reconnect?", options)
-            choice_index = dialog.choice
-            
-            if choice_index is not None and 0 <= choice_index < len(recent_connections):
-                chosen_username = recent_connections[choice_index][0]
-                self.log_message(f"[INFO] Attempting to reconnect as '{chosen_username}'...", msg_type="info")
-            elif choice_index == -1: 
-                self.log_message("[INFO] Proceeding with a new connection.", msg_type="info")
-                for uname_to_delete, _ in recent_connections:
-                    try:
-                        os.remove(get_connection_file(uname_to_delete))
-                    except:
-                        pass 
-                chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
-            else:
-                self.log_message("[INFO] No reconnection selected or dialog cancelled. Please enter a username.", msg_type="info")
-                chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
-        else:
-            chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
+        chosen_username = simpledialog.askstring("Username", "Enter your username:", parent=self)
 
         if not chosen_username:
             self.log_message("[ERROR] Username cannot be empty. Exiting.", msg_type="error")
@@ -1247,54 +1221,6 @@ class BattleshipGUI(tk.Tk):
 
         if self.winfo_exists():
             self.destroy()
-
-
-class ReconnectionDialog(simpledialog.Dialog):
-    """Dialog for handling reconnection to a previous game session."""
-    
-    def __init__(self, parent, title, options):
-        self.options = options
-        self.choice = None 
-        super().__init__(parent, title)
-
-    def body(self, master):
-        """Creates the dialog body with a listbox of reconnection options."""
-        tk.Label(master, text="Recent disconnection(s) found:").pack(pady=5)
-        self.listbox = tk.Listbox(master, selectmode=tk.SINGLE, exportselection=False)
-        for i, option_text in enumerate(self.options):
-            self.listbox.insert(tk.END, f"{i+1}. {option_text}")
-        self.listbox.pack(padx=10, pady=5)
-        self.listbox.bind("<Double-Button-1>", self.ok) 
-        return self.listbox 
-
-    def buttonbox(self):
-        """Creates the dialog buttons."""
-        box = tk.Frame(self)
-        tk.Button(box, text="Reconnect Selected", width=20, command=self.ok, default=tk.ACTIVE).pack(side=tk.LEFT, padx=5, pady=5)
-        tk.Button(box, text="New Connection", width=15, command=self.new_connection).pack(side=tk.LEFT, padx=5, pady=5)
-        tk.Button(box, text="Cancel", width=10, command=self.cancel).pack(side=tk.LEFT, padx=5, pady=5)
-        self.bind("<Return>", self.ok)
-        self.bind("<Escape>", self.cancel)
-        box.pack()
-
-    def ok(self, event=None):
-        """Handles the OK button click."""
-        selection = self.listbox.curselection()
-        if selection:
-            self.choice = selection[0]
-        else:
-            self.choice = None 
-        super().ok()
-    
-    def new_connection(self):
-        """Handles the New Connection button click."""
-        self.choice = -1 
-        super().ok() 
-
-    def cancel(self):
-        """Handles the Cancel button click."""
-        self.choice = None 
-        super().cancel()
 
 
 if __name__ == "__main__":
