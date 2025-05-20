@@ -116,6 +116,44 @@ def broadcast_chat_message(sender_username, message):
         except:
             pass
 
+def _is_connection_alive(conn, username_for_log):
+    """
+    Checks if a given connection is alive.
+    Returns True if alive, False otherwise.
+    """
+    try:
+        if send_packet(conn, PACKET_TYPE_HEARTBEAT, ""):
+            valid_ack, header_ack, _ = receive_packet(conn, timeout=2.0)
+            if valid_ack and header_ack and header_ack[2] == PACKET_TYPE_ACK:
+                print(f"[INFO] Heartbeat-ACK received from '{username_for_log}'. Connection is alive.")
+                return True
+            else:
+                ack_type = get_packet_type_name(header_ack[2]) if header_ack else 'N/A'
+                print(f"[INFO] Heartbeat sent to '{username_for_log}', but no/invalid ACK received (valid={valid_ack}, type={ack_type}). Connection stale.")
+                return False
+        else:
+            print(f"[INFO] Heartbeat send to '{username_for_log}' failed. Connection stale.")
+            return False
+    except socket.timeout:
+        print(f"[INFO] Socket timeout waiting for ACK from '{username_for_log}'. Connection stale.")
+        return False
+    except (socket.error, BrokenPipeError, ConnectionResetError) as e_sock:
+        print(f"[INFO] Socket error during Heartbeat-ACK with '{username_for_log}': {e_sock}. Connection stale.")
+        return False
+    except Exception as e_other:
+        print(f"[INFO] Unexpected error during Heartbeat-ACK with '{username_for_log}': {e_other}. Connection stale.")
+        return False
+
+def _send_spectator_message(conn, packet_type, payload, failure_context_msg):
+    """
+    Helper to send a packet to a spectator and log failures.
+    Returns True on success, False on failure.
+    """
+    if not send_packet(conn, packet_type, payload):
+        print(f"[INFO] Failed to send spectator message ({failure_context_msg})")
+        return False
+    return True
+
 class ProtocolAdapter:
     def __init__(self, conn, username):
         self.conn = conn
@@ -203,7 +241,6 @@ def handle_player_disconnect(player_conn, player_name):
     Handle a player disconnection during gameplay.
     Marks the player as disconnected and starts the reconnection window.
     """
-    print(f"[DEBUG] Handling disconnection for player {player_name}")
     
     with disconnected_players_lock:
         disconnected_players[player_name] = {
@@ -261,7 +298,6 @@ def handle_waiting_player(conn, addr, username, stop_event):
 
         while not stop_event.is_set():
             if stop_event.wait(timeout=0.2):
-                print(f"[DEBUG] handle_waiting_player for {username} detected stop_event. Exiting loop.")
                 is_active_player = False
                 break
 
@@ -269,7 +305,6 @@ def handle_waiting_player(conn, addr, username, stop_event):
                 valid, header, payload = receive_packet(conn, timeout=2.0) 
                 
                 if stop_event.is_set():
-                    print(f"[DEBUG] handle_waiting_player for {username} detected stop_event after receive_packet. Exiting loop.")
                     is_active_player = False
                     break
 
@@ -329,20 +364,16 @@ def handle_waiting_player(conn, addr, username, stop_event):
 
 def handle_spectator(conn, addr, game):
     """Handle a spectator connection."""
-    print(f"[DEBUG] New spectator connection from {addr}")
     spectator_username = f"Spectator@{addr[0]}:{addr[1]}"
     
     try:
-        if not send_packet(conn, PACKET_TYPE_CHAT, "\nWelcome! You are now spectating a Battleship game."):
-            print("[DEBUG] Failed to send welcome message")
+        if not _send_spectator_message(conn, PACKET_TYPE_CHAT, "\nWelcome! You are now spectating a Battleship game.", "welcome"):
             return
             
-        if not send_packet(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate in the game."):
-            print("[DEBUG] Failed to send welcome message")
+        if not _send_spectator_message(conn, PACKET_TYPE_CHAT, "You will see all game updates but cannot participate in the game.", "no participation info"):
             return
             
-        if not send_packet(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating. You can send chat messages that will be seen by all players and spectators."):
-            print("[DEBUG] Failed to send welcome message")
+        if not _send_spectator_message(conn, PACKET_TYPE_CHAT, "Type 'quit' to stop spectating. You can send chat messages that will be seen by all players and spectators.", "quit instructions"):
             return
         
         # Send current game state information
@@ -356,8 +387,7 @@ def handle_spectator(conn, addr, game):
         else:
             game_state_message += "Waiting for game to start...\n"
             
-        if not send_packet(conn, PACKET_TYPE_CHAT, game_state_message):
-            print("[DEBUG] Failed to send game state message")
+        if not _send_spectator_message(conn, PACKET_TYPE_CHAT, game_state_message, "initial game state"):
             return
 
         # Add spectator to the list
@@ -382,9 +412,7 @@ def handle_spectator(conn, addr, game):
                 current_time = time.time()
                 
                 if current_time - last_heartbeat >= heartbeat_interval:
-                    print("[DEBUG] Sending spectator heartbeat")
-                    if not send_packet(conn, PACKET_TYPE_HEARTBEAT, b''):
-                        print("[DEBUG] Failed to send heartbeat")
+                    if not _send_spectator_message(conn, PACKET_TYPE_HEARTBEAT, b'', "heartbeat send"):
                         break
                     last_heartbeat = current_time
                 
@@ -398,8 +426,7 @@ def handle_spectator(conn, addr, game):
                     if game.last_move_result:
                         status_message += f"Result: {game.last_move_result}\n"
                         
-                    if not send_packet(conn, PACKET_TYPE_CHAT, status_message):
-                        print("[DEBUG] Failed to send status update")
+                    if not _send_spectator_message(conn, PACKET_TYPE_CHAT, status_message, "status update"):
                         break
                     last_status_update = current_time
                 
@@ -415,30 +442,25 @@ def handle_spectator(conn, addr, game):
                 print(f"[DEBUG] Received packet from spectator: type={get_packet_type_name(ptype)}")
                 
                 if ptype == PACKET_TYPE_HEARTBEAT:
-                    print("[DEBUG] Received heartbeat from spectator")
-                    if not send_packet(conn, PACKET_TYPE_ACK, b''):
-                        print("[DEBUG] Failed to send heartbeat ACK")
+                    print(f"[DEBUG] Received heartbeat from spectator {spectator_username}")
+                    if not _send_spectator_message(conn, PACKET_TYPE_ACK, b'', "heartbeat ACK"):
                         break
                 elif ptype == PACKET_TYPE_ACK:
-                    print("[DEBUG] Received ACK from spectator")
+                    print(f"[DEBUG] Received ACK from spectator {spectator_username}")
                     continue
                 elif ptype == PACKET_TYPE_CHAT:
                     payload_str = payload.decode() if isinstance(payload, bytes) else payload
                     if payload_str.lower() == 'quit':
                         print(f"[DEBUG] Spectator {addr} requested to quit")
-                        if not send_packet(conn, PACKET_TYPE_CHAT, "You have left the spectator mode. Goodbye!"):
-                            print("[DEBUG] Failed to send goodbye message")
+                        _send_spectator_message(conn, PACKET_TYPE_CHAT, "You have left the spectator mode. Goodbye!", "quit confirmation")
                         break
                     else:
                         broadcast_chat_message(spectator_username, payload_str)
                 elif ptype == PACKET_TYPE_MOVE:
-                    payload_str = payload.decode() if isinstance(payload, bytes) else payload
-                    if not send_packet(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave or send chat messages."):
-                        print("[DEBUG] Failed to send spectator restriction message")
+                    _send_spectator_message(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave, or send chat messages.", "move restriction")
                 else:
-                    print(f"[DEBUG] Unexpected packet type from spectator: {get_packet_type_name(ptype)}")
-                    if not send_packet(conn, PACKET_TYPE_CHAT, "As a spectator, you can use 'quit' to leave or send chat messages."):
-                        print("[DEBUG] Failed to send help message")
+                    print(f"[DEBUG] Unexpected packet type from spectator {spectator_username}: {get_packet_type_name(ptype)}")
+                    _send_spectator_message(conn, PACKET_TYPE_CHAT, "As a spectator, you can use 'quit' to leave or send chat messages.", "help message")
                     continue
                     
             except socket.timeout:
@@ -975,28 +997,9 @@ def check_username_available(username):
             if not existing_conn:
                 print(f"[DEBUG] Anomaly: '{username}' key was in active_usernames but value was None. Treating as available.")
             else:
-                print(f"[DEBUG] Username '{username}' found in active_usernames. Verifying existing connection status with Heartbeat-ACK.")
-                is_connection_truly_alive = False
-                try:
-                    if send_packet(existing_conn, PACKET_TYPE_HEARTBEAT, ""):
-                        valid_ack, header_ack, payload_ack = receive_packet(existing_conn, timeout=2.0) 
-                        if valid_ack and header_ack and header_ack[2] == PACKET_TYPE_ACK:
-                            is_connection_truly_alive = True
-                            print(f"[DEBUG] Heartbeat-ACK received from '{username}'. Connection is live.")
-                        else:
-                            print(f"[DEBUG] Heartbeat sent to '{username}', but no/invalid ACK received. (valid_ack={valid_ack}, header_type={get_packet_type_name(header_ack[2]) if header_ack else 'N/A'}). Treating as stale.")
-                    else:
-                        print(f"[DEBUG] Heartbeat send to '{username}' failed (send_packet returned False). Treating as stale.")
-                except socket.timeout:
-                    print(f"[DEBUG] Socket timeout waiting for ACK from '{username}'. Treating as stale.")
-                except (socket.error, BrokenPipeError, ConnectionResetError) as e_sock:
-                    print(f"[DEBUG] Socket error during Heartbeat-ACK with '{username}': {e_sock}. Treating as stale.")
-                except Exception as e_other:
-                    print(f"[DEBUG] Unexpected error during Heartbeat-ACK with '{username}': {e_other}. Treating as stale.")
-
-                if is_connection_truly_alive:
-                    return (False, "Username already in use by another player.")
-                else:
+                print(f"[DEBUG] Username '{username}' found in active_usernames. Verifying existing connection status.")
+                if not _is_connection_alive(existing_conn, username):
+                    # Connection is stale or dead
                     print(f"[DEBUG] Cleaning up stale/dead active connection for '{username}'.")
                     try:
                         existing_conn.close()
@@ -1006,13 +1009,10 @@ def check_username_available(username):
                     if active_usernames.get(username) == existing_conn:
                         del active_usernames[username]
 
-                    print(f"[DEBUG CUA Provisional Check] For username '{username}'. game_in_progress: {game_in_progress}, current_game is RealGame: {isinstance(current_game, RealGame)}")
                     if game_in_progress and isinstance(current_game, RealGame):
                         username_lower = username.lower()
                         cg_player1_lower = current_game.player1.lower() if hasattr(current_game, 'player1') and current_game.player1 else ""
                         cg_player2_lower = current_game.player2.lower() if hasattr(current_game, 'player2') and current_game.player2 else ""
-                        
-                        print(f"[DEBUG CUA Provisional Check] Comparing '{username_lower}' with CG P1 '{cg_player1_lower}' and CG P2 '{cg_player2_lower}'")
                         
                         is_player_in_current_game = False
                         if cg_player1_lower and username_lower == cg_player1_lower:
@@ -1032,7 +1032,6 @@ def check_username_available(username):
                                         needs_provisional_marking = False
                                 
                                 if needs_provisional_marking:
-                                    print(f"[DEBUG] Provisionally marking original-case '{username}' as disconnected from game '{game_id_of_active_game}'.")
                                     disconnected_players[username] = {
                                         'disconnect_time': time.time(),
                                         'opponent_username': opponent_name,
@@ -1040,13 +1039,9 @@ def check_username_available(username):
                                         'game_state': None,
                                         'source': 'provisional_from_check_username_available'
                                     }
-                                else:
-                                    print(f"[DEBUG] '{username}' already in disconnected_players for game '{game_id_of_active_game}' with game_state. No provisional update needed.")
-                        else:
-                            print(f"[DEBUG CUA Provisional Check] '{username}' not part of current game players ('{current_game.player1}', '{current_game.player2}'). No provisional marking.")
-                    else:
-                        print(f"[DEBUG CUA Provisional Check] Game not in progress or not RealGame instance. No provisional marking for '{username}'.")
 
+                else:
+                    return (False, "Username already in use by another player.")
 
     with disconnected_players_lock:
         if username in disconnected_players:

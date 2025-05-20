@@ -1035,8 +1035,6 @@ class BattleshipGUI(tk.Tk):
             
             self.chat_display.config(state=tk.DISABLED)
             self.chat_display.see(tk.END)
-        else:
-            pass
 
 
     def _on_closing(self):
