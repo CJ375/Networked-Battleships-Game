@@ -913,6 +913,39 @@ def run_game_server():
                     except: pass
                 continue
 
+            with game_lock:
+                if not game_in_progress:
+                    with waiting_players_lock:
+                        if waiting_players.empty():
+                            with spectators_lock:
+                                for spec_conn in list(current_game_spectators):
+                                    if waiting_players.qsize() >= 2:
+                                        break
+                                    try:
+                                        if send_packet(spec_conn, PACKET_TYPE_CHAT, "The previous game has ended. Would you like to play in the next game? (Type YES within 10s to join queue):"):
+                                            is_valid_resp, header_resp, payload_resp = receive_packet(spec_conn, timeout=10.0)
+                                            if is_valid_resp and header_resp and payload_resp:
+                                                resp_str = payload_resp.decode().strip().upper()
+                                                if resp_str == "YES":
+                                                    send_packet(spec_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game queue.")
+                                                    current_game_spectators.remove(spec_conn)
+                                                    try:
+                                                        spec_conn.close()
+                                                    except: pass
+                                                else:
+                                                    send_packet(spec_conn, PACKET_TYPE_CHAT, "Okay, you will remain a spectator if a new game starts.")
+                                        else:
+                                            current_game_spectators.remove(spec_conn)
+                                            try: spec_conn.close()
+                                            except: pass
+                                    except Exception as e_spec_poll:
+                                        print(f"[INFO] Error while polling spectator {spec_conn.getpeername() if hasattr(spec_conn, 'getpeername') else 'unknown_spec'} to play: {e_spec_poll}. Removing.")
+                                        if spec_conn in current_game_spectators:
+                                            current_game_spectators.remove(spec_conn)
+                                        try: spec_conn.close()
+                                        except: pass
+
+
 def main():
     """
     Entry point for the server.
