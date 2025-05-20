@@ -1039,6 +1039,30 @@ class BattleshipGUI(tk.Tk):
 
         water_bg_color = "#4682B4" 
 
+        hit_positions = []
+        current_hits = []
+        last_was_hit = False
+
+        for r, row_data in enumerate(grid_data):
+            if r >= self.board_size: continue
+            for c, cell_char in enumerate(row_data):
+                if c >= self.board_size: continue
+                
+                if cell_char == 'X':
+                    if not last_was_hit:
+                        current_hits = []
+                    current_hits.append((r, c))
+                    last_was_hit = True
+                else:
+                    if last_was_hit and current_hits:
+                        hit_positions.append(current_hits)
+                        current_hits = []
+                    last_was_hit = False
+            if last_was_hit and current_hits:
+                hit_positions.append(current_hits)
+                current_hits = []
+                last_was_hit = False
+
         for r, row_data in enumerate(grid_data):
             if r >= self.board_size: continue
             for c, cell_char in enumerate(row_data):
@@ -1080,6 +1104,19 @@ class BattleshipGUI(tk.Tk):
                     canvas.create_line(x0_rect + hit_x_padding, y1_rect - hit_x_padding,
                                         x1_rect - hit_x_padding, y0_rect + hit_x_padding,
                                         fill='#DC143C', width=3, tags="cells")
+
+        for hits in hit_positions:
+            if len(hits) > 1:
+                first_r, first_c = hits[0]
+                last_r, last_c = hits[-1]
+                
+                start_x = grid_origin_x + first_c * self.cell_size + self.cell_size / 2
+                start_y = grid_origin_y + first_r * self.cell_size + self.cell_size / 2
+                end_x = grid_origin_x + last_c * self.cell_size + self.cell_size / 2
+                end_y = grid_origin_y + last_r * self.cell_size + self.cell_size / 2
+                
+                canvas.create_line(start_x, start_y, end_x, end_y,
+                                 fill='#DC143C', width=2, tags="cells")
 
     def _send_chat(self):
         """Handles sending chat messages."""
