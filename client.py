@@ -145,6 +145,44 @@ def check_any_recent_connections():
     recent_usernames.sort(key=lambda x: x[1])
     return recent_usernames
 
+MSG_TYPE_CONFIG = {
+    "self_chat": {
+        "split_message": True,
+        "sender_tag": "self_msg_sender",
+        "text_tag": "self_msg_text",
+    },
+    "other_chat": {
+        "split_message": True,
+        "sender_tag": "other_msg_sender",
+        "text_tag": "other_msg_text",
+    },
+    "spectator_chat": {
+        "split_message": True,
+        "sender_tag": "spectator_msg_sender",
+        "text_tag": "spectator_msg_text",
+    },
+    "server_chat": {
+        "sender_name_override": "Server",
+        "sender_tag": "server_info_sender",
+        "text_tag": "server_info_text",
+    },
+    "error": {
+        "sender_name_override": "System",
+        "sender_tag": "error_msg_sender",
+        "text_tag": "error_msg_text",
+    },
+    "info": {
+        "sender_name_override": "System",
+        "sender_tag": "server_info_sender",
+        "text_tag": "server_info_text",
+    },
+    "game_event": {"text_tag": "game_event_text"},
+    "action_log": {"text_tag": "action_log_text"},
+    "placement_log": {"text_tag": "placement_log_text"},
+    "debug": {"text_tag": "debug_log_text"},
+    None: {"text_tag": "other_msg_text"} 
+}
+
 class BattleshipGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -982,52 +1020,18 @@ class BattleshipGUI(tk.Tk):
             now = time.strftime("[%H:%M:%S] ", time.localtime())
             self.chat_display.insert(tk.END, now, "timestamp")
 
-            sender_name = None
+            config = MSG_TYPE_CONFIG.get(msg_type, MSG_TYPE_CONFIG[None])
+
+            sender_name = config.get("sender_name_override")
             text_content = message
-            base_text_tag = "other_msg_text"
-            sender_tag = None
+            sender_tag = config.get("sender_tag")
+            base_text_tag = config.get("text_tag", MSG_TYPE_CONFIG[None]["text_tag"])
 
-            if msg_type == "self_chat":
+            if config.get("split_message", False) and not sender_name:
                 parts = message.split(":", 1)
                 sender_name = parts[0].strip()
                 text_content = parts[1].strip() if len(parts) > 1 else ""
-                sender_tag = "self_msg_sender"
-                base_text_tag = "self_msg_text"
-            elif msg_type == "other_chat":
-                parts = message.split(":", 1)
-                sender_name = parts[0].strip()
-                text_content = parts[1].strip() if len(parts) > 1 else ""
-                sender_tag = "other_msg_sender"
-                base_text_tag = "other_msg_text"
-            elif msg_type == "spectator_chat":
-                parts = message.split(":", 1)
-                sender_name = parts[0].strip()
-                text_content = parts[1].strip() if len(parts) > 1 else ""
-                sender_tag = "spectator_msg_sender"
-                base_text_tag = "spectator_msg_text"
-            elif msg_type == "server_chat":
-                sender_name = "Server"
-                text_content = message
-                sender_tag = "server_info_sender"
-                base_text_tag = "server_info_text"
-            elif msg_type == "error":
-                sender_name = "System"
-                sender_tag = "error_msg_sender"
-                base_text_tag = "error_msg_text"
-            elif msg_type == "info":
-                sender_name = "System"
-                sender_tag = "server_info_sender"
-                base_text_tag = "server_info_text"
-            elif msg_type == "game_event":
-                base_text_tag = "game_event_text"
-            elif msg_type == "action_log":
-                base_text_tag = "action_log_text"
-            elif msg_type == "placement_log":
-                 base_text_tag = "placement_log_text"
-            elif msg_type == "debug":
-                base_text_tag = "debug_log_text"
-
-
+            
             if sender_name and sender_tag:
                 self.chat_display.insert(tk.END, f"{sender_name}: ", sender_tag)
             
@@ -1035,7 +1039,6 @@ class BattleshipGUI(tk.Tk):
             
             self.chat_display.config(state=tk.DISABLED)
             self.chat_display.see(tk.END)
-
 
     def _on_closing(self):
         if messagebox.askokcancel("Quit", "Do you want to quit Battleship?"):
