@@ -526,6 +526,11 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
             except PlayerDisconnectedError as pde:
                 game_ended_due_to_disconnect = True
                 print(f"[GAME SESSION {game_id}] PlayerDisconnectedError: {pde.player_name} disconnected.")
+
+                if pde.player_name == player1_username:
+                    handle_player_disconnect(player1_adapter.conn, player1_username)
+                else:
+                    handle_player_disconnect(player2_adapter.conn, player2_username)
                 
                 disconnected_player_name = pde.player_name
                 other_player_name = player2_username if disconnected_player_name == player1_username else player1_username
