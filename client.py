@@ -664,8 +664,6 @@ class BattleshipGUI(tk.Tk):
                                 parsed_p2 = True
                         except IndexError:
                             pass
-                if parsed_p1 or parsed_p2:
-                    pass
                 self.log_message(payload_str, msg_type="game_event")
                 is_spectator_status_msg = True
             

@@ -9,6 +9,7 @@
 *.pywz
 *.pyzw
 *.json
+*.txt
 __pycache__/battleship.cpython-312.pyc
 testgame.py
 testrun.py

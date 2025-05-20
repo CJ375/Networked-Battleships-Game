@@ -10,11 +10,12 @@ import binascii
 import random
 import time
 import socket
-import os # For IV generation
+import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-# Magic number to identify our protocol (hex value for "BSHP")
+PROTOCOL_VERBOSE_DEBUG = True
+
 MAGIC_NUMBER = 0x42534850
 
 # Packet types
@@ -46,11 +47,7 @@ HEADER_FORMAT = ">IIBI" # unsigned int, unsigned int, unsigned char, unsigned in
 AES_KEY_SIZE = 32  # 256-bit key
 IV_SIZE = 16       # AES block size, 128-bit IV for CTR mode
 
-# PRE-SHARED KEY (PSK) - IMPORTANT: This should be securely managed and distributed out-of-band.
-# For demonstration, it's hardcoded. Replace with a securely generated key.
-PRE_SHARED_KEY = b'\x00' * AES_KEY_SIZE # Replace with your actual 32-byte key
-# Example: PRE_SHARED_KEY = os.urandom(AES_KEY_SIZE)
-# print(f"Using PSK: {PRE_SHARED_KEY.hex()}") # For debugging if you generate one
+PRE_SHARED_KEY = b'\x00' * AES_KEY_SIZE
 
 # Global sequence number counter
 next_sequence_number = 0
@@ -87,28 +84,22 @@ def create_packet(packet_type, payload):
     seq_num = get_next_sequence_number()
     payload_bytes = payload.encode() if isinstance(payload, str) else payload
     
-    # Generate IV and encrypt payload
     iv = os.urandom(IV_SIZE)
     encrypted_payload = _encrypt_payload(payload_bytes, PRE_SHARED_KEY, iv)
     
-    # Data length is IV size + encrypted payload size
     data_length = IV_SIZE + len(encrypted_payload)
     
-    # Create header without checksum
     header_prefix = struct.pack(HEADER_FORMAT, 
                              MAGIC_NUMBER, 
                              seq_num, 
                              packet_type, 
                              data_length)
     
-    # Data to checksum: header_prefix + IV + encrypted_payload
     data_to_checksum = header_prefix + iv + encrypted_payload
     checksum = calculate_checksum(data_to_checksum)
     
-    # Add checksum to header prefix to get full header
     full_header = header_prefix + struct.pack(">I", checksum)
     
-    # Combine full_header, IV, and encrypted_payload
     return full_header + iv + encrypted_payload
 
 def decode_header(header_bytes):
@@ -134,7 +125,7 @@ def verify_packet(packet_bytes):
     If is_valid is False, iv_plus_encrypted_payload will be None.
     """
     if len(packet_bytes) < HEADER_SIZE + IV_SIZE: # Must have header and IV
-        print(f"[DEBUG] Packet too short for header + IV: {len(packet_bytes)}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Packet too short for header + IV: {len(packet_bytes)}")
         return (False, None, None)
     
     header_bytes = packet_bytes[:HEADER_SIZE]
@@ -143,34 +134,29 @@ def verify_packet(packet_bytes):
     try:
         magic, seq, ptype, dlen_from_header, received_checksum = decode_header(header_bytes)
     except Exception as e:
-        print(f"[DEBUG] Failed to decode header in verify_packet: {e}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Failed to decode header in verify_packet: {e}")
         return (False, None, None)
     
-    # Verify magic number
     if magic != MAGIC_NUMBER:
-        print(f"[DEBUG] Invalid magic number: {hex(magic)} != {hex(MAGIC_NUMBER)}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Invalid magic number: {hex(magic)} != {hex(MAGIC_NUMBER)}")
         return (False, (magic, seq, ptype, dlen_from_header), None)
     
-    # Verify payload length (dlen_from_header is length of IV + encrypted_payload)
     if len(iv_plus_encrypted_payload) != dlen_from_header:
-        print(f"[DEBUG] (IV + Encrypted Payload) length mismatch: {len(iv_plus_encrypted_payload)} != {dlen_from_header}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] (IV + Encrypted Payload) length mismatch: {len(iv_plus_encrypted_payload)} != {dlen_from_header}")
         return (False, (magic, seq, ptype, dlen_from_header), None)
     
-    # Calculate checksum of header_prefix + (IV + encrypted_payload)
-    # header_prefix is the first 13 bytes of header_bytes
     calculated_checksum = calculate_checksum(header_bytes[:13] + iv_plus_encrypted_payload)
     
-    # Verify checksum
     is_valid = (calculated_checksum == received_checksum)
     if not is_valid:
-        print(f"[DEBUG] Checksum mismatch: {hex(calculated_checksum)} != {hex(received_checksum)}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Checksum mismatch: {hex(calculated_checksum)} != {hex(received_checksum)}")
     
     decoded_header_info = (magic, seq, ptype, dlen_from_header)
     return (is_valid, decoded_header_info, iv_plus_encrypted_payload if is_valid else None)
 
 def receive_packet(sock, timeout=None):
     """
-    Receive a packet from the socket, verify, and decrypt its payload.
+    Receive a packet from the socket, verifies, and decrypts its payload.
     Returns a tuple of (is_valid, final_decoded_header, decrypted_payload).
     final_decoded_header = (magic, seq, ptype, dlen_of_decrypted_payload)
     """
@@ -179,75 +165,67 @@ def receive_packet(sock, timeout=None):
         if timeout is not None:
             sock.settimeout(timeout)
             
-        # Receive header
         header_bytes = b''
         while len(header_bytes) < HEADER_SIZE:
             chunk = sock.recv(HEADER_SIZE - len(header_bytes))
             if not chunk:
-                print("[DEBUG] Connection closed while receiving header")
-                return (False, None, None)  # Connection closed
+                if PROTOCOL_VERBOSE_DEBUG: print("[DEBUG] Connection closed while receiving header")
+                return (False, None, None)
             header_bytes += chunk
             
-        # Decode header to get length of (IV + encrypted_payload)
         try:
             _, _, _, dlen_iv_plus_encrypted, _ = decode_header(header_bytes)
         except Exception as e:
-            print(f"[DEBUG] Failed to decode header to get data length: {e}")
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Failed to decode header to get data length: {e}")
             return (False, None, None)
             
-        # Receive IV + encrypted_payload
         iv_plus_encrypted_payload_bytes = b''
         if dlen_iv_plus_encrypted < IV_SIZE:
-            print(f"[DEBUG] Data length {dlen_iv_plus_encrypted} from header is less than IV_SIZE {IV_SIZE}")
-            return (False, None, None) # Invalid length
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Data length {dlen_iv_plus_encrypted} from header is less than IV_SIZE {IV_SIZE}")
+            return (False, None, None)
             
         while len(iv_plus_encrypted_payload_bytes) < dlen_iv_plus_encrypted:
             chunk = sock.recv(min(4096, dlen_iv_plus_encrypted - len(iv_plus_encrypted_payload_bytes)))
             if not chunk:
-                print("[DEBUG] Connection closed while receiving IV+payload")
-                return (False, None, None)  # Connection closed
+                if PROTOCOL_VERBOSE_DEBUG: print("[DEBUG] Connection closed while receiving IV+payload")
+                return (False, None, None)
             iv_plus_encrypted_payload_bytes += chunk
             
-        # Verify complete packet (header + IV + encrypted_payload)
         is_valid, header_info_from_verify, verified_iv_plus_encrypted_payload = verify_packet(header_bytes + iv_plus_encrypted_payload_bytes)
         
         if not is_valid:
-            # Get packet type from header_info_for_verify for logging if available
             ptype_for_log = header_info_from_verify[2] if header_info_from_verify else "N/A"
             magic_for_log = hex(header_info_from_verify[0]) if header_info_from_verify else "N/A"
             seq_for_log = header_info_from_verify[1] if header_info_from_verify else "N/A"
-            print(f"[DEBUG] Packet verification failed: magic={magic_for_log}, seq={seq_for_log}, type={get_packet_type_name(ptype_for_log) if isinstance(ptype_for_log, int) else ptype_for_log}")
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Packet verification failed: magic={magic_for_log}, seq={seq_for_log}, type={get_packet_type_name(ptype_for_log) if isinstance(ptype_for_log, int) else ptype_for_log}")
             return (False, header_info_from_verify, None)
         
-        # If valid, extract IV, decrypt payload
-        magic, seq, ptype, _ = header_info_from_verify # dlen here is for IV+encrypted
+        magic, seq, ptype, _ = header_info_from_verify
         
         iv = verified_iv_plus_encrypted_payload[:IV_SIZE]
         encrypted_actual_payload = verified_iv_plus_encrypted_payload[IV_SIZE:]
         
         try:
             decrypted_payload = _decrypt_payload(encrypted_actual_payload, PRE_SHARED_KEY, iv)
-            print(f"[DEBUG] Received and decrypted packet: magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}, original_len={len(decrypted_payload)}")
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Received and decrypted packet: magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}, original_len={len(decrypted_payload)}")
             final_decoded_header = (magic, seq, ptype, len(decrypted_payload))
             return (True, final_decoded_header, decrypted_payload)
         except Exception as e:
-            print(f"[DEBUG] Payload decryption failed: {e}. magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}")
-            return (False, header_info_from_verify, None) # Return raw header info from verify
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Payload decryption failed: {e}. magic={hex(magic)}, seq={seq}, type={get_packet_type_name(ptype)}")
+            return (False, header_info_from_verify, None)
         
     except socket.timeout:
-        # This is an expected condition if timeout is set
-        print(f"[DEBUG] Socket timeout in receive_packet after {timeout}s")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Socket timeout in receive_packet after {timeout}s")
         return (False, None, None)
     except Exception as e:
-        print(f"[DEBUG] Error in receive_packet: {e}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Error in receive_packet: {e}")
         return (False, None, None)
     finally:
-        # Restore original timeout
         if timeout is not None:
             try:
                 sock.settimeout(original_timeout)
             except socket.error as se_sock:
-                print(f"[DEBUG] Error restoring socket timeout: {se_sock}")
+                if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Error restoring socket timeout: {se_sock}")
 
 def send_packet(sock, packet_type, payload, max_retries=3):
     """
@@ -256,11 +234,11 @@ def send_packet(sock, packet_type, payload, max_retries=3):
     Returns True if the packet was sent successfully, False otherwise.
     """
     try:
-        packet = create_packet(packet_type, payload) # payload is plaintext here
+        packet = create_packet(packet_type, payload)
         payload_len = len(payload.encode() if isinstance(payload, str) else payload)
-        print(f"[DEBUG] Sending packet: type={get_packet_type_name(packet_type)}, plaintext_len={payload_len}, packet_len={len(packet)}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Sending packet: type={get_packet_type_name(packet_type)}, plaintext_len={payload_len}, packet_len={len(packet)}")
     except Exception as e:
-        print(f"[DEBUG] Error creating packet in send_packet: {e}")
+        if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Error creating packet in send_packet: {e}")
         return False
     
     for attempt in range(max_retries):
@@ -268,14 +246,13 @@ def send_packet(sock, packet_type, payload, max_retries=3):
             sock.sendall(packet)
             return True
         except (socket.error, BrokenPipeError) as e:
-            print(f"[DEBUG] Send attempt {attempt + 1} failed: {e}")
+            if PROTOCOL_VERBOSE_DEBUG: print(f"[DEBUG] Send attempt {attempt + 1} failed: {e}")
             if attempt == max_retries - 1:
                 return False
-            time.sleep(0.1 * (attempt + 1))  # Backoff before retry
+            time.sleep(0.1 * (attempt + 1))
     
     return False
 
-# For testing/debugging purposes
 def corrupt_packet(packet_bytes, corruption_rate=0.01):
     """
     Randomly corrupt some bytes in the packet to simulate transmission errors.
@@ -287,7 +264,6 @@ def corrupt_packet(packet_bytes, corruption_rate=0.01):
             corrupted[i] = random.randint(0, 255)
     return bytes(corrupted)
 
-# Error handling policies
 def handle_corrupted_packet(sock, seq_num):
     """
     Request retransmission of a corrupted packet.
