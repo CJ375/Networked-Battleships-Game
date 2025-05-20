@@ -127,10 +127,17 @@ def _is_connection_alive(conn, username_for_log):
 
 def _send_spectator_message(conn, packet_type, payload, failure_context_msg):
     """Sends a packet to a spectator and logs any failures."""
-    if not send_packet(conn, packet_type, payload):
-        print(f"[INFO] Failed to send spectator message ({failure_context_msg})")
+    try:
+        if not send_packet(conn, packet_type, payload):
+            print(f"[INFO] Failed to send spectator message ({failure_context_msg})")
+            return False
+        return True
+    except (ConnectionResetError, BrokenPipeError) as e:
+        print(f"[INFO] Connection error sending spectator message ({failure_context_msg}): {e}")
         return False
-    return True
+    except Exception as e:
+        print(f"[INFO] Unexpected error sending spectator message ({failure_context_msg}): {e}")
+        return False
 
 class ProtocolAdapter:
     """Adapts the game protocol to handle different types of packets and messages."""
@@ -393,8 +400,9 @@ def handle_spectator(conn, addr, game):
                 print(f"[WARNING] Failed to send SPECTATOR_PLAYER_NAMES to {spectator_username}")
 
         with spectators_lock:
-            current_game_spectators.append(conn)
-            print(f"[DEBUG] Added spectator to list. Total spectators: {len(current_game_spectators)}")
+            if conn not in current_game_spectators:
+                current_game_spectators.append(conn)
+                print(f"[DEBUG] Added spectator to list. Total spectators: {len(current_game_spectators)}")
 
         broadcast_chat_message("SERVER", f"A new spectator has joined to watch the game")
 
@@ -402,54 +410,100 @@ def handle_spectator(conn, addr, game):
         
         last_heartbeat = time.time()
         heartbeat_interval = 15
+        socket_errors_count = 0
+        max_socket_errors = 5  # Allow a few socket errors before disconnecting
         
         while True:
             try:
                 current_time = time.time()
                 
-                if current_time - last_heartbeat >= heartbeat_interval:
-                    if not _send_spectator_message(conn, PACKET_TYPE_HEARTBEAT, b'', "heartbeat send"):
-                        break
-                    last_heartbeat = current_time
+                # Don't send heartbeats too frequently if there have been socket errors
+                if current_time - last_heartbeat >= heartbeat_interval and socket_errors_count < max_socket_errors:
+                    try:
+                        if not _send_spectator_message(conn, PACKET_TYPE_HEARTBEAT, b'', "heartbeat send"):
+                            socket_errors_count += 1
+                            print(f"[DEBUG] Heartbeat to spectator {spectator_username} failed. Error count: {socket_errors_count}")
+                            if socket_errors_count >= max_socket_errors:
+                                print(f"[DEBUG] Too many socket errors for spectator {spectator_username}. Disconnecting.")
+                                break
+                        else:
+                            # Reset error count on successful heartbeat
+                            socket_errors_count = 0
+                        last_heartbeat = current_time
+                    except Exception as e:
+                        print(f"[DEBUG] Error sending heartbeat to spectator {spectator_username}: {e}")
+                        socket_errors_count += 1
+                        if socket_errors_count >= max_socket_errors:
+                            break
                 
-                is_valid, header, payload = receive_packet(conn, timeout=1.0)
-                if not is_valid and header is not None:
-                    print("[DEBUG] Received invalid packet from spectator")
-                    continue
+                try:
+                    is_valid, header, payload = receive_packet(conn, timeout=1.0)
                     
-                if header is None:
-                    continue
+                    if not is_valid and header is not None:
+                        print("[DEBUG] Received invalid packet from spectator")
+                        continue
+                        
+                    if header is None:
+                        continue
+                        
+                    magic, seq, ptype, dlen = header
+                    print(f"[DEBUG] Received packet from spectator: type={get_packet_type_name(ptype)}")
                     
-                magic, seq, ptype, dlen = header
-                print(f"[DEBUG] Received packet from spectator: type={get_packet_type_name(ptype)}")
-                
-                if ptype == PACKET_TYPE_HEARTBEAT:
-                    print(f"[DEBUG] Received heartbeat from spectator {spectator_username}")
-                    if not _send_spectator_message(conn, PACKET_TYPE_ACK, b'', "heartbeat ACK"):
-                        break
-                elif ptype == PACKET_TYPE_ACK:
-                    print(f"[DEBUG] Received ACK from spectator {spectator_username}")
-                    continue
-                elif ptype == PACKET_TYPE_CHAT:
-                    payload_str = payload.decode() if isinstance(payload, bytes) else payload
-                    if payload_str.lower() == 'quit':
-                        print(f"[DEBUG] Spectator {addr} requested to quit")
-                        _send_spectator_message(conn, PACKET_TYPE_CHAT, "You have left the spectator mode. Goodbye!", "quit confirmation")
-                        break
+                    if ptype == PACKET_TYPE_HEARTBEAT:
+                        print(f"[DEBUG] Received heartbeat from spectator {spectator_username}")
+                        try:
+                            if not _send_spectator_message(conn, PACKET_TYPE_ACK, b'', "heartbeat ACK"):
+                                socket_errors_count += 1
+                                if socket_errors_count >= max_socket_errors:
+                                    break
+                        except Exception as e:
+                            print(f"[DEBUG] Error sending ACK to spectator heartbeat: {e}")
+                            socket_errors_count += 1
+                            if socket_errors_count >= max_socket_errors:
+                                break
+                    elif ptype == PACKET_TYPE_ACK:
+                        print(f"[DEBUG] Received ACK from spectator {spectator_username}")
+                        socket_errors_count = 0  # Successfully received an ACK, reset error count
+                        continue
+                    elif ptype == PACKET_TYPE_CHAT:
+                        payload_str = payload.decode() if isinstance(payload, bytes) else payload
+                        if payload_str.lower() == 'quit':
+                            print(f"[DEBUG] Spectator {addr} requested to quit")
+                            _send_spectator_message(conn, PACKET_TYPE_CHAT, "You have left the spectator mode. Goodbye!", "quit confirmation")
+                            break
+                        else:
+                            try:
+                                broadcast_chat_message(spectator_username, payload_str)
+                                socket_errors_count = 0  # Successfully processed a chat, reset error count
+                            except Exception as e:
+                                print(f"[DEBUG] Error broadcasting spectator chat: {e}")
+                                socket_errors_count += 1
+                                if socket_errors_count >= max_socket_errors:
+                                    break
+                    elif ptype == PACKET_TYPE_MOVE:
+                        _send_spectator_message(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave, or send chat messages.", "move restriction")
                     else:
-                        broadcast_chat_message(spectator_username, payload_str)
-                elif ptype == PACKET_TYPE_MOVE:
-                    _send_spectator_message(conn, PACKET_TYPE_CHAT, f"As a spectator, you cannot make moves. Type 'quit' to leave, or send chat messages.", "move restriction")
-                else:
-                    print(f"[DEBUG] Unexpected packet type from spectator {spectator_username}: {get_packet_type_name(ptype)}")
-                    _send_spectator_message(conn, PACKET_TYPE_CHAT, "As a spectator, you can use 'quit' to leave or send chat messages.", "help message")
+                        print(f"[DEBUG] Unexpected packet type from spectator {spectator_username}: {get_packet_type_name(ptype)}")
+                        _send_spectator_message(conn, PACKET_TYPE_CHAT, "As a spectator, you can use 'quit' to leave or send chat messages.", "help message")
+                        continue
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"[DEBUG] Error handling spectator packet: {e}")
+                    socket_errors_count += 1
+                    if socket_errors_count >= max_socket_errors:
+                        print(f"[DEBUG] Too many errors handling spectator packets. Disconnecting spectator {spectator_username}.")
+                        break
                     continue
                     
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"[DEBUG] Error handling spectator: {e}")
-                break
+                print(f"[DEBUG] Fatal error in spectator handler: {e}")
+                socket_errors_count += 1
+                if socket_errors_count >= max_socket_errors:
+                    break
+                continue
                 
     except Exception as e:
         print(f"[DEBUG] Fatal error in spectator handler: {e}")
@@ -461,32 +515,60 @@ def handle_spectator(conn, addr, game):
                 print(f"[DEBUG] Removed spectator from list. Remaining spectators: {len(current_game_spectators)}")
                 
         broadcast_chat_message("SERVER", f"A spectator has left the game")
-        conn.close()
+        try:
+            conn.close()
+        except Exception as e:
+            print(f"[DEBUG] Error closing spectator connection: {e}")
 
 def notify_spectators(message):
     """Sends a message to all connected spectators."""
     with spectators_lock:
-        for conn in current_game_spectators[:]: 
+        spectators_to_remove = []
+        for conn in list(current_game_spectators):
             try:
-                send_packet(conn, PACKET_TYPE_BOARD_UPDATE, message)
-            except:
+                if not send_packet(conn, PACKET_TYPE_BOARD_UPDATE, message):
+                    print(f"[INFO] Failed to send board update to spectator. Adding to removal list.")
+                    spectators_to_remove.append(conn)
+            except (ConnectionResetError, BrokenPipeError) as e:
+                print(f"[INFO] Connection error sending board update to spectator: {e}. Adding to removal list.")
+                spectators_to_remove.append(conn)
+            except Exception as e:
+                print(f"[INFO] Unexpected error sending board update to spectator: {e}. Adding to removal list.")
+                spectators_to_remove.append(conn)
+        
+        # Remove any broken connections
+        for conn in spectators_to_remove:
+            if conn in current_game_spectators:
                 current_game_spectators.remove(conn)
+                try:
+                    conn.close()
+                except:
+                    pass
 
 def send_event_to_spectators(event_message):
     """Sends a CHAT message to all connected spectators for game events."""
     with spectators_lock:
+        spectators_to_remove = []
         for conn in list(current_game_spectators):
             try:
                 # Prefixing for clarity on the client side, though client can format as it sees fit
-                send_packet(conn, PACKET_TYPE_CHAT, f"[GAME EVENT] {event_message}")
+                if not send_packet(conn, PACKET_TYPE_CHAT, f"[GAME EVENT] {event_message}"):
+                    print(f"[INFO] Failed to send event to spectator. Adding to removal list.")
+                    spectators_to_remove.append(conn)
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                print(f"[INFO] Socket error sending event to spectator: {e}. Adding to removal list.")
+                spectators_to_remove.append(conn)
             except Exception as e:
-                print(f"[INFO] Error sending event to spectator {conn.getpeername() if hasattr(conn, 'getpeername') else 'unknown_spec'}: {e}. Removing spectator.")
+                print(f"[INFO] Unexpected error sending event to spectator: {e}. Adding to removal list.")
+                spectators_to_remove.append(conn)
+        
+        # Clean up broken connections
+        for conn in spectators_to_remove:
+            if conn in current_game_spectators:
+                current_game_spectators.remove(conn)
                 try:
-                    current_game_spectators.remove(conn)
                     conn.close()
-                except ValueError: # Already removed
-                    pass
-                except Exception: # Error during close
+                except:
                     pass
 
 def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, player1_username, player2_username, game_id):
@@ -702,11 +784,12 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                     with spectators_lock:
                         available_spectators = list(current_game_spectators)
                     
-                    if len(available_spectators) >= 2:
-                        if not player1_wants_rematch and not player2_wants_rematch:
-                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                            notify_spectators(f"Both players declined rematch. Starting a new game with spectators!")
+                    if not player1_wants_rematch and not player2_wants_rematch:
+                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                        
+                        if len(available_spectators) >= 2:
+                            notify_spectators(f"Both players declined rematch. Starting a new game with the first two spectators!")
                             
                             spec1_conn = available_spectators[0]
                             spec2_conn = available_spectators[1]
@@ -720,67 +803,61 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
                             
                             try:
                                 spec1_conn.close()
+                            except: pass
+                            try:
                                 spec2_conn.close()
-                            except:
-                                pass
-                            
-                            play_again = False
-                        elif player1_wants_rematch or player2_wants_rematch:
-                            staying_player = player1_username if player1_wants_rematch else player2_username
-                            leaving_player = player2_username if player1_wants_rematch else player1_username
-                            staying_conn = player1_adapter.conn if player1_wants_rematch else player2_adapter.conn
-                            
-                            send_packet(staying_conn, PACKET_TYPE_CHAT, f"{leaving_player} declined rematch. Looking for a new opponent...")
-                            send_packet(player1_adapter.conn if not player1_wants_rematch else player2_adapter.conn, 
-                                      PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                            
-                            if available_spectators:
-                                spec_conn = available_spectators[0]
-                                
-                                with spectators_lock:
-                                    current_game_spectators.remove(spec_conn)
-                                
-                                send_packet(spec_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game as a player.")
-                                notify_spectators(f"{leaving_player} declined rematch. {staying_player} will play against a new opponent.")
-                                
-                                try:
-                                    spec_conn.close()
-                                except:
-                                    pass
-                                
-                                play_again = False
-                            else:
-                                send_packet(staying_conn, PACKET_TYPE_GAME_END, "No spectators available to play. Session ending.")
-                                notify_spectators(f"{leaving_player} declined rematch and no spectators available. Game ending.")
-                                play_again = False
+                            except: pass
                         else:
-                            play_again = False
-                            if not player1_wants_rematch:
-                                send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                                send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
-                                notify_spectators(f"{player1_username} declined a rematch.")
-                            elif not player2_wants_rematch:
-                                send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                                send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
-                                notify_spectators(f"{player2_username} declined a rematch.")
-                    else:
+                            notify_spectators(f"Both players declined rematch and not enough spectators for a new game. Game session is ending.")
+                        
                         play_again = False
-                        if not player1_wants_rematch:
-                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, f"{player1_username} declined rematch. Session ending.")
-                            notify_spectators(f"{player1_username} declined a rematch.")
-                        elif not player2_wants_rematch:
-                            send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
-                            send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, f"{player2_username} declined rematch. Session ending.")
-                            notify_spectators(f"{player2_username} declined a rematch.")
+                    
+                    elif player1_wants_rematch or player2_wants_rematch:
+                        staying_player = player1_username if player1_wants_rematch else player2_username
+                        leaving_player = player2_username if player1_wants_rematch else player1_username
+                        staying_conn = player1_adapter.conn if player1_wants_rematch else player2_adapter.conn
+                        staying_adapter = player1_adapter if player1_wants_rematch else player2_adapter
+                        leaving_conn = player2_adapter.conn if player1_wants_rematch else player1_adapter.conn
+
+                        send_packet(leaving_conn, PACKET_TYPE_GAME_END, "You declined rematch. Session ending.")
+                        
+                        if available_spectators:
+                            spec_conn = available_spectators[0]
+                            
+                            with spectators_lock:
+                                current_game_spectators.remove(spec_conn)
+                            
+                            send_packet(staying_conn, PACKET_TYPE_CHAT, f"{leaving_player} declined rematch. You'll play against a spectator instead.")
+                            send_packet(spec_conn, PACKET_TYPE_CHAT, "Please reconnect with a username to join the game as a player.")
+                            notify_spectators(f"{leaving_player} declined rematch. {staying_player} will play against a new opponent from spectators.")
+                            
+                            try:
+                                spec_conn.close()
+                            except: pass
+                            
+                            with waiting_players_lock:
+                                player_stop_event = threading.Event()
+                                if staying_player == player1_username:
+                                    waiting_players.put((player1_adapter.conn, player1_addr, player1_username, player_stop_event))
+                                    print(f"[INFO] Keeping {staying_player} in active_usernames and adding to waiting queue.")
+                                else:
+                                    waiting_players.put((player2_adapter.conn, player2_addr, player2_username, player_stop_event))
+                                    print(f"[INFO] Keeping {staying_player} in active_usernames and adding to waiting queue.")
+                        else:
+                            send_packet(staying_conn, PACKET_TYPE_GAME_END, "No spectators available to play with you. Session ending.")
+                            notify_spectators(f"{leaving_player} declined rematch and no spectators available. Game ending.")
+                        
+                        play_again = False
                     break
 
         if not play_again:
             print(f"[GAME SESSION {game_id}] Session ended.")
             try:
                 if not game_ended_due_to_disconnect:
-                    send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
-                    send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
+                    if not (player1_wants_rematch and not player2_wants_rematch):
+                        send_packet(player1_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
+                    if not (player2_wants_rematch and not player1_wants_rematch):
+                        send_packet(player2_adapter.conn, PACKET_TYPE_GAME_END, "Thank you for playing!")
             except: pass
             notify_spectators("Game session has concluded.")
 
@@ -793,16 +870,29 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
         notify_spectators(f"Game session ended due to a server error: {e}")
     finally:
         print(f"[GAME SESSION {game_id}] Cleaning up session.")
+        
+        staying_player_username = None
+        if player1_wants_rematch and not player2_wants_rematch:
+            staying_player_username = player1_username
+        elif player2_wants_rematch and not player1_wants_rematch:
+            staying_player_username = player2_username
+        
         with active_usernames_lock:
             if player1_username in active_usernames and active_usernames.get(player1_username) == player1_adapter.conn:
-                print(f"[DEBUG] Removing P1 ({player1_username}) of this session from active_usernames.")
-                del active_usernames[player1_username]
+                if staying_player_username != player1_username:
+                    print(f"[DEBUG] Removing P1 ({player1_username}) of this session from active_usernames.")
+                    del active_usernames[player1_username]
+                else:
+                    print(f"[DEBUG] Keeping P1 ({player1_username}) in active_usernames for next game.")
             elif player1_username in active_usernames:
-                 print(f"[DEBUG] P1 ({player1_username}) was in active_usernames but with a different connection. Not removing from active_usernames list by this ended session.")
+                print(f"[DEBUG] P1 ({player1_username}) was in active_usernames but with a different connection. Not removing from active_usernames list by this ended session.")
 
             if player2_username in active_usernames and active_usernames.get(player2_username) == player2_adapter.conn:
-                print(f"[DEBUG] Removing P2 ({player2_username}) of this session from active_usernames.")
-                del active_usernames[player2_username]
+                if staying_player_username != player2_username:
+                    print(f"[DEBUG] Removing P2 ({player2_username}) of this session from active_usernames.")
+                    del active_usernames[player2_username]
+                else:
+                    print(f"[DEBUG] Keeping P2 ({player2_username}) in active_usernames for next game.")
             elif player2_username in active_usernames:
                 print(f"[DEBUG] P2 ({player2_username}) was in active_usernames but with a different connection. Not removing from active_usernames list by this ended session.")
         
@@ -812,10 +902,12 @@ def handle_game_session(player1_conn, player2_conn, player1_addr, player2_addr, 
             if player2_username in disconnected_players and disconnected_players[player2_username].get('game_id') == game_id:
                 del disconnected_players[player2_username]
         
-        try: player1_adapter.conn.close()
-        except: pass
-        try: player2_adapter.conn.close()
-        except: pass
+        if staying_player_username != player1_username:
+            try: player1_adapter.conn.close()
+            except: pass
+        if staying_player_username != player2_username:
+            try: player2_adapter.conn.close()
+            except: pass
         
         with game_lock:
             game_in_progress = False
