@@ -484,13 +484,11 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         initial_current_player_name=None):
     """
     Run a two-player Battleship game. Can start fresh or resume from a state.
-    Returns a game state dictionary if a player disconnects, otherwise None (normal game end).
     """
     
     def send_to_player(player_wfile, msg):
         """
         Sends a message to the player.
-        Relies on player_wfile (ProtocolAdapter) to handle exceptions like PlayerDisconnectedError.
         """
         try:
             player_wfile.write(msg + '\n')
@@ -507,7 +505,6 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
     def send_board_to_player(player_wfile, own_board, opponent_board=None):
         """
         Sends board state(s) to the player.
-        Relies on player_wfile (ProtocolAdapter) to handle PlayerDisconnectedError during writes/flushes.
         """
         player_name = getattr(player_wfile, 'username', 'UnknownPlayer')
         try:
@@ -541,6 +538,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             raise PlayerDisconnectedError(player_name, None) from e
             
     def send_board_to_spectators(p1_board_obj, p2_board_obj, notify_callback_func):
+        """Sends board state(s) to spectators."""
         try:
             board_data = []
             board_data.append("SPECTATOR_GRID\n")
@@ -577,7 +575,8 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         except Exception as e:
             print(f"Error sending board to spectators: {e}")
             
-    def handle_ship_placement(player_rfile, player_wfile, player_board_obj, p_name):
+    def handle_ship_placement(player_rfile, player_wfile, player_board_obj, p_name, opponent_board):
+        """Handles the ship placement phase of a game session."""
         send_to_player(player_wfile, f"{p_name}, it's time to place your ships!")
         send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
         
@@ -591,7 +590,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             send_to_player(player_wfile, "No selection made within timeout period. Ships will be placed randomly.")
             player_board_obj.place_ships_randomly(SHIPS)
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
-            send_board_to_player(player_wfile, player_board_obj)
+            send_board_to_player(player_wfile, player_board_obj, opponent_board)
             return True
 
         choice = choice.upper()[0] if choice else ""
@@ -600,7 +599,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             for ship_name, ship_size in SHIPS:
                 placed = False
                 while not placed:
-                    send_board_to_player(player_wfile, player_board_obj) 
+                    send_board_to_player(player_wfile, player_board_obj, opponent_board) 
                     send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
                     send_to_player(player_wfile, "Enter starting coordinate and orientation (e.g. A1 H or B2 V):")
                     
@@ -644,12 +643,12 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
                         send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
             
             send_to_player(player_wfile, "All ships placed successfully!")
-            send_board_to_player(player_wfile, player_board_obj)
+            send_board_to_player(player_wfile, player_board_obj, opponent_board)
             return True
         else:
             player_board_obj.place_ships_randomly(SHIPS)
             send_to_player(player_wfile, "Ships have been placed randomly on your board.")
-            send_board_to_player(player_wfile, player_board_obj)
+            send_board_to_player(player_wfile, player_board_obj, opponent_board)
             return True
 
     def randomly_place_single_ship(board, ship_name, ship_size):
@@ -696,7 +695,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         send_to_player(player2_wfile, f"Waiting for {player1_username} to place ships...")
         
         try:
-            if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, player1_username):
+            if not handle_ship_placement(player1_rfile, player1_wfile, player1_board, player1_username, player2_board):
                  raise PlayerDisconnectedError(player1_username, {
                     'player1_board_state': player1_board.serialize(),
                     'player2_board_state': player2_board.serialize(),
@@ -720,7 +719,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
         send_to_player(player2_wfile, f"{player1_username} has placed their ships. Now it's your turn.")
         
         try:
-            if not handle_ship_placement(player2_rfile, player2_wfile, player2_board, player2_username):
+            if not handle_ship_placement(player2_rfile, player2_wfile, player2_board, player2_username, player1_board):
                 raise PlayerDisconnectedError(player2_username, {
                     'player1_board_state': player1_board.serialize(),
                     'player2_board_state': player2_board.serialize(),
@@ -833,6 +832,7 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
 
 
 def handle_spectator(conn, addr, spectators):
+    """Handles spectator connections."""
     rfile = conn.makefile('r')
     wfile = conn.makefile('w')
     spectators.append((conn, wfile))

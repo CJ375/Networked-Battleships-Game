@@ -751,6 +751,33 @@ class BattleshipGUI(tk.Tk):
         global current_username
 
         if packet_type == PACKET_TYPE_BOARD_UPDATE:
+            if self.awaiting_shot_result and self.last_fired_coord:
+                lines = payload_str.strip().split('\n')
+                opponent_grid_start = -1
+                for i, line in enumerate(lines):
+                    if "Opponent's Grid:" in line:
+                        opponent_grid_start = i
+                        break
+                
+                if opponent_grid_start != -1:
+                    row = ord(self.last_fired_coord[0].upper()) - ord('A')
+                    col = int(self.last_fired_coord[1:]) - 1
+                    
+                    for i in range(opponent_grid_start + 1, len(lines)):
+                        line = lines[i].strip()
+                        if not line:
+                            break
+                        if line[0].isalpha() and line[1] == ' ':
+                            cells = line.split()[1:]
+                            if len(cells) == self.board_size:
+                                if i - (opponent_grid_start + 1) == row:
+                                    result = cells[col]
+                                    if result == 'X':
+                                        self.log_command(f"[SHOT RESULT] Hit at {self.last_fired_coord}!", msg_type="action_log")
+                                    elif result == 'o':
+                                        self.log_command(f"[SHOT RESULT] Miss at {self.last_fired_coord}!", msg_type="action_log")
+                                    break
+
             event_summary = self._filter_board_data_for_logging(payload_str)
             if event_summary:
                 self.log_command("\n" + event_summary, msg_type="game_event")
@@ -981,45 +1008,47 @@ class BattleshipGUI(tk.Tk):
                 self.draw_board_on_canvas(self.opponent_board_canvas, player2_grid_data)
 
         else:
-            player_grid_data = []
-            opponent_grid_data = []
             current_parsing_grid = None
+            current_grid_data = []
 
             for line in lines:
                 line_strip = line.strip()
                 if not line_strip:
+                    if current_parsing_grid == "player" and current_grid_data:
+                        self.draw_board_on_canvas(self.player_board_canvas, current_grid_data)
+                        current_grid_data = []
+                    elif current_parsing_grid == "opponent" and current_grid_data:
+                        self.draw_board_on_canvas(self.opponent_board_canvas, current_grid_data)
+                        current_grid_data = []
                     continue
 
                 if "Your Grid:" in line_strip:
                     current_parsing_grid = "player"
                     self.player_board_label.config(text=f"Your Board ({self.username})")
+                    current_grid_data = []
                     continue
                 elif "Opponent's Grid:" in line_strip:
                     current_parsing_grid = "opponent"
                     if hasattr(self, 'opponent_board_name_label'):
                         self.opponent_board_name_label.config(text="Opponent's Board")
+                    current_grid_data = []
                     continue
                 
                 if line_strip and line_strip[0].isspace() and any(char.isdigit() for char in line_strip):
                     if all(item.isdigit() for item in line_strip.split()):
                         continue
                 
-                if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip :
+                if current_parsing_grid and line_strip and line_strip[0].isalpha() and " " in line_strip:
                     cells = [c for c in line_strip.split(' ') if c]
                     if cells:
                         row_char = cells.pop(0)
                         if len(cells) == self.board_size:
-                            if current_parsing_grid == "player":
-                                player_grid_data.append(cells)
-                            elif current_parsing_grid == "opponent":
-                                opponent_grid_data.append(cells)
-                        else:
-                            pass
-            
-            if player_grid_data:
-                self.draw_board_on_canvas(self.player_board_canvas, player_grid_data)
-            if opponent_grid_data:
-                self.draw_board_on_canvas(self.opponent_board_canvas, opponent_grid_data)
+                            current_grid_data.append(cells)
+
+            if current_parsing_grid == "player" and current_grid_data:
+                self.draw_board_on_canvas(self.player_board_canvas, current_grid_data)
+            elif current_parsing_grid == "opponent" and current_grid_data:
+                self.draw_board_on_canvas(self.opponent_board_canvas, current_grid_data)
 
     def draw_board_on_canvas(self, canvas, grid_data):
         """Draws the game board on the specified canvas using the provided grid data."""

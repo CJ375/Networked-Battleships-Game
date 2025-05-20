@@ -927,5 +927,81 @@ def check_username_available(username):
     print(f"[DEBUG] '{username}' is available for a new session.")
     return (True, None)
 
+def handle_ship_placement(player_rfile, player_wfile, player_board_obj, p_name, opponent_board_obj=None):
+    """Handles the ship placement phase of a game session."""
+    send_to_player(player_wfile, f"{p_name}, it's time to place your ships!")
+    send_to_player(player_wfile, "Would you like to place ships manually (M) or randomly (R)? [M/R]:")
+    
+    choice = None
+    try:
+        choice = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT, p_name)
+    except PlayerDisconnectedError:
+        raise
+
+    if choice is None:
+        send_to_player(player_wfile, "No selection made within timeout period. Ships will be placed randomly.")
+        player_board_obj.place_ships_randomly(SHIPS)
+        send_to_player(player_wfile, "Ships have been placed randomly on your board.")
+        send_board_to_player(player_wfile, player_board_obj, opponent_board_obj)
+        return True
+
+    choice = choice.upper()[0] if choice else ""
+    
+    if choice == 'M':
+        for ship_name, ship_size in SHIPS:
+            placed = False
+            while not placed:
+                send_board_to_player(player_wfile, player_board_obj, opponent_board_obj) 
+                send_to_player(player_wfile, f"Placing your {ship_name} (size {ship_size}).")
+                send_to_player(player_wfile, "Enter starting coordinate and orientation (e.g. A1 H or B2 V):")
+                
+                combined_input = None
+                try:
+                    combined_input = recv_from_player_with_timeout(player_rfile, MOVE_TIMEOUT, p_name)
+                except PlayerDisconnectedError:
+                    raise
+
+                if combined_input is None:
+                    send_to_player(player_wfile, f"Timeout waiting for input. {ship_name} will be placed randomly.")
+                    randomly_place_single_ship(player_board_obj, ship_name, ship_size)
+                    send_to_player(player_wfile, f"{ship_name} placed randomly.")
+                    placed = True
+                    continue
+                elif combined_input.lower() == 'quit':
+                    raise PlayerDisconnectedError(p_name, None)
+
+                try:
+                    parts = combined_input.strip().upper().split()
+                    if len(parts) != 2:
+                        send_to_player(player_wfile, "Invalid format. Expected coordinate and orientation (e.g., A1 H).")
+                        continue
+                    
+                    coord_str, orientation_char = parts[0], parts[1]
+                    row, col = parse_coordinate(coord_str)
+                    orientation_enum = 0 if orientation_char == 'H' else (1 if orientation_char == 'V' else -1)
+
+                    if orientation_enum == -1:
+                        send_to_player(player_wfile, "Invalid orientation. Please enter 'H' or 'V'.")
+                        continue
+                    
+                    if player_board_obj.can_place_ship(row, col, ship_size, orientation_enum):
+                        occupied_positions = player_board_obj.do_place_ship(row, col, ship_size, orientation_enum)
+                        player_board_obj.placed_ships.append({'name': ship_name, 'positions': occupied_positions})
+                        send_to_player(player_wfile, f"{ship_name} placed successfully!")
+                        placed = True
+                    else:
+                        send_to_player(player_wfile, f"Cannot place {ship_name} at {coord_str} (orientation={orientation_char}). Try again.")
+                except ValueError as e:
+                    send_to_player(player_wfile, f"Invalid input: {e}. Try again.")
+            
+        send_to_player(player_wfile, "All ships placed successfully!")
+        send_board_to_player(player_wfile, player_board_obj, opponent_board_obj)
+        return True
+    else:
+        player_board_obj.place_ships_randomly(SHIPS)
+        send_to_player(player_wfile, "Ships have been placed randomly on your board.")
+        send_board_to_player(player_wfile, player_board_obj, opponent_board_obj)
+        return True
+
 if __name__ == "__main__":
     main()
