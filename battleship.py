@@ -758,6 +758,18 @@ def run_two_player_game(player1_rfile, player1_wfile, player2_rfile, player2_wfi
             
             send_to_player(current_wfile, f"It's your turn, {actual_current_player_name}!")
             send_to_player(other_wfile, f"Waiting for {actual_current_player_name} to make a move...")
+
+            try:
+                sock = current_rfile.conn
+                sock.setblocking(False)
+                while True:
+                    data = sock.recv(4096)
+                    if not data:
+                        break
+            except BlockingIOError:
+                pass
+            finally:
+                sock.setblocking(True)
             
             send_board_to_player(current_wfile, current_board_obj, opponent_board_obj)
             

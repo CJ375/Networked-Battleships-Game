@@ -428,15 +428,17 @@ class BattleshipGUI(tk.Tk):
 
     def _on_opponent_board_click(self, event):
         """Handles clicks on the opponent's board during gameplay."""
-        if self.is_spectator or self.is_placing_ships:
+        if self.is_spectator or self.is_placing_ships or self.awaiting_shot_result:
             return
+        
+        self.awaiting_shot_result = True
 
         coord = self._canvas_coord_to_grid_coord(event.x, event.y)
         if coord and self.sock:
             if send_packet(self.sock, PACKET_TYPE_MOVE, coord):
                 self.last_fired_coord = coord
-                self.awaiting_shot_result = True
             else:
+                self.awaiting_shot_result = False
                 self.log_message("[ERROR] Failed to send fire command.", msg_type="error")
 
     def _on_player_board_click(self, event):
