@@ -1,6 +1,8 @@
 /.idea
 /.venv
 /__pycache__
+/.reconnection_date
+*.txt
 *.pyc
 *.pyo
 *.pyd
@@ -8,4 +10,5 @@
 *.pyz
 *.pywz
 *.pyzw
+*.ds_store
 __pycache__/battleship.cpython-312.pyc
