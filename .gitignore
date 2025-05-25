@@ -10,5 +10,10 @@
 *.pyz
 *.pywz
 *.pyzw
+*.json
+*.txt
 *.ds_store
 __pycache__/battleship.cpython-312.pyc
+testgame.py
+testrun.py
+.DS_Store
